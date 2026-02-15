@@ -1,0 +1,994 @@
+:root{
+  --bg:#070913;
+  --panel:#0c1022;
+  --muted:#8f9bb7;
+  --text:#e8ecff;
+  --line:rgba(255,255,255,.10);
+  --shadow:rgba(0,0,0,.6);
+  --accent:#7c5cff;
+  --accent2:#23d5ab;
+}
+*{box-sizing:border-box}
+html,body{
+  margin:0;
+  padding:0;
+  height:100%;
+}
+body{
+  font-family: ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,"Apple Color Emoji","Segoe UI Emoji";
+  background: var(--bg);
+  color:var(--text);
+}
+.app{
+  width: 100%;
+  height: 100%;
+}
+.stage{
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 280px;
+  bottom: 0;
+  overflow: hidden;
+}
+#view{
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.panel{
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 280px;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+  padding: 10px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.panel-inner{
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.panel-header{padding-bottom:6px; border-bottom:1px solid var(--line);}
+.title{font-size:16px; font-weight:700; letter-spacing:.2px;}
+.subtitle{font-size:10px; color:var(--muted); margin-top:2px;}
+.section-title{font-size:11px; font-weight:600; color:var(--accent2); margin-bottom:6px;}
+.status-section{
+  background: linear-gradient(135deg, rgba(124,92,255,.1), rgba(35,213,171,.05));
+  border-color: rgba(124,92,255,.3);
+}
+.status-grid{
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.status-item{
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 8px;
+  background: rgba(0,0,0,.2);
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,.05);
+}
+.status-label{
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 500;
+}
+.status-value{
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent2);
+  font-variant-numeric: tabular-nums;
+}
+.section{padding:8px; border:1px solid var(--line); border-radius:10px; background: rgba(255,255,255,.02);}
+.row{display:flex; gap:8px; align-items:center; justify-content:space-between; margin-bottom:6px;}
+.row:last-child{margin-bottom:0;}
+.btn{
+  flex:1;
+  border:1px solid var(--line);
+  background: rgba(255,255,255,.04);
+  color:var(--text);
+  padding:7px 10px;
+  border-radius:8px;
+  cursor:pointer;
+  font-size:11px;
+}
+.btn:hover{background: rgba(255,255,255,.07);}
+.btn.primary{
+  border-color: rgba(124,92,255,.55);
+  background: rgba(124,92,255,.20);
+}
+.btn.primary:hover{background: rgba(124,92,255,.28);}
+.label{font-size:11px; color:var(--muted); min-width:76px;}
+.control{flex:1; display:flex; flex-direction:column; gap:4px;}
+.hint{font-size:10px; color:var(--muted);}
+input[type="range"]{width:100%;}
+.control .input{width:100%; box-sizing:border-box;}
+.select,.input{
+  width:100%;
+  padding:6px 8px;
+  border-radius:8px;
+  border:1px solid var(--line);
+  background: rgba(0,0,0,.22);
+  color:var(--text);
+  font-size:11px;
+}
+.checkbox{display:flex; align-items:center; gap:10px; color:var(--text);}
+.checkbox span{font-size:13px; color:var(--muted)}
+.seed{display:flex; flex-direction:column; gap:8px;}
+.seed-label{font-size:12px; color:var(--muted);}
+.footer{margin-top:auto; padding-top:6px;}
+.small{font-size:12px; color:var(--muted); line-height:1.35;}
+/* ══════════════════════════════════════
+   Draggable Panel System
+   ══════════════════════════════════════ */
+.slot{
+  position: absolute;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  pointer-events: none;
+  min-height: 20px;
+  min-width: 60px;
+  border-radius: 6px;
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.slot > *{ pointer-events: auto; }
+.slot--hover{
+  background: rgba(124,92,255,0.08);
+  box-shadow: inset 0 0 0 2px rgba(124,92,255,0.35);
+  pointer-events: auto;
+}
+.slot-tl{ left: 10px; top: 10px; max-width: 200px; }
+.slot-ml{ left: 10px; top: 180px; max-width: 200px; }
+.slot-bl{ left: 10px; bottom: 10px; max-width: 340px; }
+.slot-tr{ right: 10px; top: 10px; max-width: 220px; }
+.slot-mr{ right: 10px; top: 50%; transform: translateY(-50%); max-width: 220px; }
+.slot-br{ right: 10px; bottom: 10px; max-width: 520px; }
+
+.dp{
+  background: rgba(8,10,20,0.82);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 8px;
+  backdrop-filter: blur(6px);
+  overflow: hidden;
+  transition: opacity 0.15s, border-color 0.15s;
+}
+.dp--dragging{
+  opacity: 0.35;
+}
+.dp--ghost{
+  position: fixed;
+  z-index: 9999;
+  pointer-events: none;
+  opacity: 0.8;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+  border: 1px solid rgba(124,92,255,0.5);
+}
+.dp-header{
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  cursor: grab;
+  user-select: none;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+  background: rgba(255,255,255,0.02);
+}
+.dp-header:active{ cursor: grabbing; }
+.dp-grip{
+  font-size: 10px;
+  color: rgba(255,255,255,0.2);
+  flex-shrink: 0;
+  line-height: 1;
+}
+.dp-title{
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--accent2);
+  opacity: 0.7;
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dp-collapse{
+  background: none;
+  border: none;
+  color: rgba(255,255,255,0.3);
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 8px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+.dp-collapse:hover{ color: rgba(255,255,255,0.6); }
+.dp-arrow{
+  font-size: 8px;
+}
+.dp-body{
+  padding: 5px 8px;
+  overflow: hidden;
+  max-height: 800px;
+  transition: max-height 0.25s ease, padding 0.25s ease, opacity 0.2s ease;
+  opacity: 1;
+}
+.dp--collapsed .dp-body{
+  max-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  opacity: 0;
+}
+.dp--collapsed .dp-header{
+  border-bottom-color: transparent;
+}
+
+/* Sidebar panels get section styling */
+#slot-sidebar .dp{
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255,255,255,.02);
+}
+#slot-sidebar .dp-header{
+  background: transparent;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+#slot-sidebar .dp-body{
+  padding: 8px;
+}
+
+.hud-row{
+  display:flex;
+  gap:12px;
+  justify-content:space-between;
+  font-size:11px;
+  margin-bottom: 4px;
+  padding: 2px 0;
+}
+.hud-row:last-child{margin-bottom: 0;}
+.hud-label{
+  color:var(--muted);
+  font-weight: 500;
+}
+.hud-value{
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--accent2);
+}
+.hud-value.warning{color: #ff9500;}
+.hud-value.danger{color: #ff3b30;}
+
+/* ── Performance HUD ── */
+.perf-row{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+.perf-label{
+  color: var(--muted);
+  font-weight: 500;
+  width: 42px;
+  flex-shrink: 0;
+  font-size: 10px;
+}
+.perf-bar-track{
+  flex: 1;
+  height: 6px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.perf-bar-fill{
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.15s ease, background 0.3s ease;
+  min-width: 1px;
+}
+.perf-good{ background: #23d5ab; }
+.perf-warn{ background: #ffaa00; }
+.perf-bad{ background: #ff4444; }
+.perf-val{
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--text);
+  width: 38px;
+  text-align: right;
+  flex-shrink: 0;
+  font-size: 10px;
+}
+
+/* ── Organelle Development ── */
+.organelle-section{
+  background: linear-gradient(135deg, rgba(168,85,247,.08), rgba(249,115,22,.04));
+  border-color: rgba(168,85,247,.2);
+}
+.organelle-bars{
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.organelle-row{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.organelle-icon{
+  font-size: 8px;
+  width: 12px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.organelle-name{
+  font-size: 10px;
+  color: var(--muted);
+  width: 64px;
+  flex-shrink: 0;
+}
+.organelle-bar-track{
+  flex: 1;
+  height: 6px;
+  background: rgba(0,0,0,.3);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.organelle-bar-fill{
+  height: 100%;
+  width: 0%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+.organelle-val{
+  font-size: 10px;
+  color: var(--muted);
+  width: 28px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Cell Specialization ── */
+.roles-section{
+  background: linear-gradient(135deg, rgba(124,92,255,.08), rgba(35,213,171,.04));
+  border-color: rgba(124,92,255,.2);
+}
+.roles-grid{
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.role-item{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  background: rgba(0,0,0,.2);
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,.04);
+}
+.role-dot{
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.role-name{
+  font-size: 11px;
+  color: var(--muted);
+  flex: 1;
+}
+.role-count{
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.multicell-bar-wrap{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.multicell-label{
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.multicell-bar-track{
+  flex: 1;
+  height: 8px;
+  background: rgba(0,0,0,.3);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.multicell-bar-fill{
+  height: 100%;
+  width: 0%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  transition: width 0.3s ease;
+}
+.multicell-pct{
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent2);
+  width: 30px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Organisms ── */
+.organisms-section{
+  background: linear-gradient(135deg, rgba(56,189,248,.08), rgba(168,85,247,.04));
+  border-color: rgba(56,189,248,.2);
+}
+.organism-list{
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 140px;
+  overflow-y: auto;
+}
+.organism-empty{
+  font-size: 11px;
+  color: var(--muted);
+  text-align: center;
+  padding: 8px 0;
+  opacity: 0.6;
+}
+.organism-entry{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  background: rgba(0,0,0,.25);
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,.06);
+  transition: border-color 0.2s;
+}
+.organism-entry:hover{
+  border-color: rgba(255,255,255,.15);
+}
+.organism-swatch{
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex-shrink: 0;
+  box-shadow: 0 0 4px rgba(255,255,255,.15);
+}
+.organism-info{
+  flex: 1;
+  min-width: 0;
+}
+.organism-name{
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.organism-meta{
+  font-size: 10px;
+  color: var(--muted);
+  display: flex;
+  gap: 8px;
+}
+.organism-meta span{
+  font-variant-numeric: tabular-nums;
+}
+.organism-cells{
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent2);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+/* ── Evolved Mechanisms ── */
+.mechanism-section{
+  background: linear-gradient(135deg, rgba(100,255,200,.06), rgba(100,150,255,.04));
+  border-color: rgba(100,255,200,.2);
+}
+.mechanism-grid{
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.mech-category{
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: rgba(255,255,255,.4);
+  margin-top: 4px;
+  margin-bottom: 1px;
+}
+.mech-category:first-child{ margin-top: 0; }
+.mech-item{
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.mech-dot{
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.mech-label{
+  font-size: 10px;
+  color: var(--muted);
+  width: 68px;
+  flex-shrink: 0;
+}
+.mech-val{
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text);
+  width: 28px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+/* ── Behavioral Evolution ── */
+.behavior-section{
+  background: linear-gradient(135deg, rgba(255,220,60,.06), rgba(255,120,50,.04));
+  border-color: rgba(255,220,60,.2);
+}
+.behavior-grid{
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.behavior-item{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.behavior-label{
+  font-size: 10px;
+  color: var(--muted);
+  width: 56px;
+  flex-shrink: 0;
+}
+.behavior-val{
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text);
+  width: 32px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+/* ── Largest Organisms ── */
+.largest-section{
+  background: linear-gradient(135deg, rgba(124,92,255,.08), rgba(56,189,248,.04));
+  border-color: rgba(124,92,255,.25);
+}
+.largest-list{
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 120px;
+  overflow-y: auto;
+}
+.largest-entry{
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 6px;
+  background: rgba(0,0,0,.25);
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,.06);
+}
+.largest-rank{
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--accent);
+  width: 14px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.largest-swatch{
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+.largest-info{
+  flex: 1;
+  min-width: 0;
+}
+.largest-name{
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.largest-meta{
+  font-size: 10px;
+  color: var(--muted);
+  display: flex;
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
+}
+.largest-count{
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.largest-bar-track{
+  width: 40px;
+  height: 5px;
+  background: rgba(0,0,0,.3);
+  border-radius: 3px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.largest-bar-fill{
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+/* ── Longest Species ── */
+.species-section{
+  background: linear-gradient(135deg, rgba(251,191,36,.08), rgba(168,85,247,.04));
+  border-color: rgba(251,191,36,.2);
+}
+.species-list{
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 110px;
+  overflow-y: auto;
+}
+.species-entry{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  background: rgba(0,0,0,.25);
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,.06);
+}
+.species-rank{
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--muted);
+  width: 14px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.species-swatch{
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.species-info{
+  flex: 1;
+  min-width: 0;
+}
+.species-name{
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.species-meta{
+  font-size: 10px;
+  color: var(--muted);
+  display: flex;
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
+}
+.species-age{
+  font-size: 10px;
+  font-weight: 600;
+  color: #fbbf24;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+/* ── Food Chain ── */
+.foodchain-section{
+  background: linear-gradient(135deg, rgba(248,113,113,.08), rgba(251,191,36,.04));
+  border-color: rgba(248,113,113,.2);
+}
+.foodchain-list{
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 100px;
+  overflow-y: auto;
+}
+.foodchain-entry{
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  background: rgba(0,0,0,.25);
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,.06);
+  font-size: 11px;
+}
+.foodchain-predator{
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 80px;
+}
+.foodchain-arrow{
+  color: #f87171;
+  font-size: 10px;
+  flex-shrink: 0;
+  padding: 0 2px;
+}
+.foodchain-prey{
+  font-weight: 500;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 80px;
+}
+.foodchain-kills{
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 600;
+  color: #f87171;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+/* ── Filters (inside controls) ── */
+.controls-section select{
+  width: 100%;
+  background: rgba(0,0,0,.3);
+  color: var(--text);
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-size: 11px;
+  outline: none;
+}
+.controls-section select:focus{
+  border-color: var(--accent);
+}
+
+/* ── Collapsible Controls ── */
+.controls-section{
+  background: linear-gradient(135deg, rgba(96,165,250,.04), rgba(56,189,248,.02));
+  border-color: rgba(96,165,250,.15);
+}
+.controls-toggle{
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--accent2);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 4px 0;
+  text-align: left;
+  letter-spacing: 0.3px;
+}
+.controls-toggle:hover{ opacity: 0.8; }
+.controls-body{
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: hidden;
+  transition: max-height 0.25s ease, opacity 0.2s ease;
+  max-height: 1200px;
+  opacity: 1;
+}
+.controls-body.collapsed{
+  max-height: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ── Overlay slot compact styles ── */
+.slot-ml .organelle-name{ width: 48px; font-size: 9px; }
+.slot-ml .organelle-icon{ font-size: 7px; width: 10px; }
+.slot-ml .organelle-val{ font-size: 9px; width: 24px; }
+.slot-ml .organelle-row{ gap: 4px; }
+.slot-ml .organelle-bars{ gap: 2px; }
+.slot-ml .behavior-label{ width: 40px; font-size: 9px; }
+.slot-ml .behavior-val{ font-size: 9px; width: 28px; }
+.slot-ml .behavior-grid{ gap: 2px; }
+.slot-ml .bar-track{ height: 4px; }
+.slot-tl .hud-row{ font-size: 11px; }
+
+/* ── Overlay shared content styles ── */
+.ovl-row{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.ovl-stat{
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  background: rgba(0,0,0,.25);
+  border-radius: 5px;
+  border: 1px solid rgba(255,255,255,.04);
+}
+.ovl-lbl{
+  font-size: 9px;
+  color: var(--muted);
+  font-weight: 500;
+}
+.ovl-val{
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--accent2);
+  font-variant-numeric: tabular-nums;
+}
+.ovl-tag{
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  color: var(--muted);
+  padding: 1px 5px;
+  background: rgba(0,0,0,.2);
+  border-radius: 4px;
+}
+.ovl-dot{
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.ovl-mc-row{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
+}
+.ovl-mc-row .multicell-bar-track{
+  height: 6px;
+}
+.ovl-mc-row .multicell-pct{
+  font-size: 10px;
+  width: 28px;
+}
+
+/* ── Species list ── */
+.species-list{
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 140px;
+  overflow-y: auto;
+}
+.species-row{
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: rgba(0,0,0,.15);
+  font-size: 9px;
+  color: var(--muted);
+}
+.species-row .sp-dot{
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.species-row .sp-name{
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+  color: #c0c8e0;
+}
+.species-row .sp-bar{
+  width: 40px;
+  height: 4px;
+  background: rgba(255,255,255,.06);
+  border-radius: 2px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.species-row .sp-bar-fill{
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+.species-row .sp-pop{
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--accent2);
+  font-variant-numeric: tabular-nums;
+  width: 26px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+/* ── Mechanism columns ── */
+.mech-cols{
+  display: flex;
+  gap: 10px;
+}
+.mech-col{
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.mech-col .mech-category{
+  font-size: 8px;
+  margin-top: 3px;
+  margin-bottom: 0;
+}
+.mech-col .mech-category:first-child{ margin-top: 0; }
+.mech-col .mech-item{
+  gap: 3px;
+}
+.mech-col .mech-label{
+  font-size: 9px;
+  width: 52px;
+}
+.mech-col .mech-val{
+  font-size: 9px;
+  width: 24px;
+}
+.mech-col .bar-track{
+  flex: 1;
+  height: 4px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.mech-col .bar-fill{
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.2s ease;
+  min-width: 1px;
+}
+
+/* Shared bar-track/bar-fill (used in panel behavioral section too) */
+.bar-track{
+  flex: 1;
+  height: 5px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.bar-fill{
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.2s ease;
+  min-width: 1px;
+  background: var(--accent);
+}
