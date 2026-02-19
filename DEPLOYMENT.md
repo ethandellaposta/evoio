@@ -19,6 +19,15 @@ The simulation runs in the user's browser (JS + WASM), using local CPU/GPU resou
    - **Build output directory**: `dist`
 4. Deploy.
 
+## Post-deploy smoke test (2 minutes)
+
+1. Load the app once, then hard refresh once.
+2. Open DevTools Network and confirm:
+   - `index.html` is revalidated (not long-lived immutable)
+   - `/assets/*` are long-cache immutable
+   - `.wasm` is cached and served successfully
+3. Start/pause/reset simulation to confirm no runtime errors.
+
 ## Important note about WASM artifacts
 
 This project imports WASM bindings from `pkg/` at build time. Keep `pkg/` artifacts committed so Cloudflare can build without installing Rust/wasm-pack in CI.
@@ -45,6 +54,14 @@ npm run preview
 - fingerprinted assets and wasm: long immutable cache
 
 This keeps updates safe while minimizing repeat bandwidth/cost.
+
+## Netlify fallback (if needed)
+
+`netlify.toml` is now configured as a backup static target:
+
+- Build command: `npm ci && npm run build`
+- Publish directory: `dist`
+- Cache headers mirror the Cloudflare strategy (HTML revalidate, assets/wasm immutable)
 
 ## Future extension (optional)
 
