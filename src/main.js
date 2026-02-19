@@ -513,6 +513,7 @@ async function main() {
   const renderer = new Renderer(el.canvas)
 
   let running = true
+  let rafId = null
   let totalBirths = 0
   let generation = 0
 
@@ -637,6 +638,10 @@ async function main() {
       lastRenderAt = now
       lastStatsAt = now
       stepsWindowAt = now
+      if (rafId == null) rafId = requestAnimationFrame(frame)
+    } else if (rafId != null) {
+      cancelAnimationFrame(rafId)
+      rafId = null
     }
   }
 
@@ -3244,6 +3249,7 @@ async function main() {
   }
 
   function frame(ts) {
+    rafId = null
     try {
       if (running) {
         const dt = ts - lastFrameAt
@@ -3324,17 +3330,19 @@ async function main() {
         }
 
         draw(ts)
+        rafId = requestAnimationFrame(frame)
       }
-      requestAnimationFrame(frame)
     } catch (err) {
       setRunning(false)
       console.error('Simulation paused due to error:', err)
     }
   }
 
-  requestAnimationFrame(frame)
+  rafId = requestAnimationFrame(frame)
 
-  window.addEventListener('resize', () => draw(performance.now()))
+  window.addEventListener('resize', () => {
+    if (running) draw(performance.now())
+  })
 
   document.addEventListener('visibilitychange', () => {
     if (document.hidden && running) {
