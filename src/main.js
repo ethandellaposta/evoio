@@ -626,9 +626,22 @@ async function main() {
 
   initUiFromParams()
 
+  function setRunning(next) {
+    if (running === next) return
+    running = next
+    if (el.play) el.play.textContent = running ? 'Pause' : 'Play'
+    if (running) {
+      const now = performance.now()
+      lastFrameAt = now
+      lastSimAt = now
+      lastRenderAt = now
+      lastStatsAt = now
+      stepsWindowAt = now
+    }
+  }
+
   el.play.addEventListener('click', () => {
-    running = !running
-    el.play.textContent = running ? 'Pause' : 'Play'
+    setRunning(!running)
   })
 
   el.step.addEventListener('click', () => {
@@ -916,10 +929,7 @@ async function main() {
       btnStressStart.textContent = 'Recording...'
       if (btnStressStop) btnStressStop.disabled = false
       if (btnStressExport) btnStressExport.disabled = true
-      if (!running) {
-        running = true
-        el.play.textContent = 'Pause'
-      }
+      if (!running) setRunning(true)
     })
   }
   if (btnStressStop) {
@@ -1583,8 +1593,7 @@ async function main() {
       const ticks = parseInt(ffTicksInput?.value || '1000', 10)
       if (ticks < 1 || ticks > 50000) return
       const wasRunning = running
-      running = false
-      el.play.textContent = 'Play'
+      setRunning(false)
       btnFF.textContent = 'Running...'
       btnFF.disabled = true
 
@@ -1611,10 +1620,7 @@ async function main() {
         } else {
           btnFF.textContent = 'FF'
           btnFF.disabled = false
-          if (wasRunning) {
-            running = true
-            el.play.textContent = 'Pause'
-          }
+          if (wasRunning) setRunning(true)
           updateHud()
           drawGraph()
         }
@@ -3239,13 +3245,13 @@ async function main() {
 
   function frame(ts) {
     try {
-      const dt = ts - lastFrameAt
-      lastFrameAt = ts
-      if (dt > 0) fpsEma = fpsEma * 0.9 + (1000 / dt) * 0.1
-
-      const requested = parseInt(el.speed ? el.speed.value : '4', 10)
-
       if (running) {
+        const dt = ts - lastFrameAt
+        lastFrameAt = ts
+        if (dt > 0) fpsEma = fpsEma * 0.9 + (1000 / dt) * 0.1
+
+        const requested = parseInt(el.speed ? el.speed.value : '4', 10)
+
         const pop = sim.cells.length
         const simInterval = (pop > 3200 ? 66 : pop > 2200 ? 50 : pop > 1400 ? 33 : 16) * TIME_SCALE
         if (ts - lastSimAt >= simInterval) {
@@ -3305,24 +3311,23 @@ async function main() {
             }
           }
         }
-      }
 
-      if (ts - lastStatsAt > 260) {
-        updateHud()
-        updatePerfHud()
-        lastStatsAt = ts
-      }
+        if (ts - lastStatsAt > 260) {
+          updateHud()
+          updatePerfHud()
+          lastStatsAt = ts
+        }
 
-      if (ts - stepsWindowAt > 1200) {
-        stepsSince = 0
-        stepsWindowAt = performance.now()
-      }
+        if (ts - stepsWindowAt > 1200) {
+          stepsSince = 0
+          stepsWindowAt = performance.now()
+        }
 
-      draw(ts)
+        draw(ts)
+      }
       requestAnimationFrame(frame)
     } catch (err) {
-      running = false
-      if (el.play) el.play.textContent = 'Play'
+      setRunning(false)
       console.error('Simulation paused due to error:', err)
     }
   }
@@ -3333,16 +3338,14 @@ async function main() {
 
   document.addEventListener('visibilitychange', () => {
     if (document.hidden && running) {
-      running = false
-      el.play.textContent = 'Play'
+      setRunning(false)
     }
   })
 
   window.addEventListener('keydown', (e) => {
     if (e.key === ' ') {
       e.preventDefault()
-      running = !running
-      el.play.textContent = running ? 'Pause' : 'Play'
+      setRunning(!running)
     }
     if (e.key.toLowerCase() === 'r') doReset()
   })
