@@ -87,35 +87,67 @@ export function installWorld(Renderer) {
       }
     }
 
+    // ── Precompute per-column world-space coordinates for caustics ──
+    // Use actual world coordinates so patterns are consistent across all zoom levels.
+    // The caustic frequency is scaled so patterns look good at the default world size.
+    const causticFreq = 24.0 / simW // normalize to world size
+    const _wxArr = new Float32Array(iw)
+    const _sinWx13 = new Float32Array(iw)
+    const _sinWx26 = new Float32Array(iw)
+    const _nxArr = new Float32Array(iw)
+    const halfCH = this.canvas.height * 0.5
+    for (let px = 0; px < iw; px++) {
+      const screenX = (px / iw) * this.canvas.width
+      const worldX = camX + (screenX - halfCW) / viewScale
+      const wx = worldX * causticFreq
+      _wxArr[px] = wx
+      _sinWx13[px] = Math.sin(wx * 1.3 + time * 0.8)
+      _sinWx26[px] = Math.sin(wx * 2.6 - time * 1.1)
+      _nxArr[px] = (px / iw) * 2 - 1
+    }
+
+    const simH = sim.h || 1
+    const causticFreqY = 18.0 / simH
+
     for (let py = 0; py < ih; py++) {
-      // Precompute row constants
       const ny = (py / ih) * 2 - 1
       const rowOff = py * iw
-      for (let px = 0; px < iw; px++) {
-        const wx = (px / iw) * 24 + camX * 0.012
-        const wy = (py / ih) * 18 + camY * 0.012
+      const screenY = (py / ih) * this.canvas.height
+      const worldY = camY + (screenY - halfCH) / viewScale
+      const wy = worldY * causticFreqY
 
-        // ── Caustics — 3 layers (removed 4th for perf) ──
-        const c1 = Math.sin(wx * 1.3 + time * 0.8) * Math.cos(wy * 1.7 - time * 0.6)
-        const c2 = Math.sin(wx * 2.6 - time * 1.1 + wy * 0.7) * Math.cos(wy * 2.2 + time * 0.5)
-        const c3 = Math.sin((wx + wy) * 1.5 + time * 0.4) * Math.sin(wx * 0.8 - wy * 1.4 + time * 0.9)
+      // Precompute per-row trig values
+      const cosWy17 = Math.cos(wy * 1.7 - time * 0.6)
+      const cosWy22 = Math.cos(wy * 2.2 + time * 0.5)
+      const wyOff07 = wy * 0.7
+      const nwy = wy * 0.35 + nebulaDy
+      const nwyVal08 = nwy * 0.8
+      const nwyVal13t = -nwy * 1.3 + time * 0.08
+      const wyC3b = -wy * 1.4 + time * 0.9
+      const purpWyPart = wy * 0.9 - time * 0.3
+
+      for (let px = 0; px < iw; px++) {
+        const wx = _wxArr[px]
+
+        // ── Caustics — 3 layers using precomputed column trig ──
+        const c1 = _sinWx13[px] * cosWy17
+        const c2 = Math.sin(wx * 2.6 - time * 1.1 + wyOff07) * cosWy22
+        const c3 = Math.sin((wx + wy) * 1.5 + time * 0.4) * Math.sin(wx * 0.8 + wyC3b)
         const caustic = (c1 * 0.35 + c2 * 0.35 + c3 * 0.3) * 0.5 + 0.5
         const causticSq = caustic * caustic
 
         // ── Purple undertow ──
-        const purp = Math.sin(wx * 0.6 + wy * 0.9 - time * 0.3) * 0.5 + 0.5
+        const purp = Math.sin(wx * 0.6 + purpWyPart) * 0.5 + 0.5
 
         // ── Nebula clouds ──
         const nwx = wx * 0.35 + nebulaDx
-        const nwy = wy * 0.35 + nebulaDy
         const nebula =
-          (Math.sin(nwx * 1.1 + nwy * 0.8) * 0.5 + 0.5) *
-          (Math.sin(nwx * 0.7 - nwy * 1.3 + time * 0.08) * 0.5 + 0.5)
+          (Math.sin(nwx * 1.1 + nwyVal08) * 0.5 + 0.5) * (Math.sin(nwx * 0.7 + nwyVal13t) * 0.5 + 0.5)
 
         // Vignette — no sqrt, use dist² approximation
-        const nx = (px / iw) * 2 - 1
+        const nx = _nxArr[px]
         const dist2 = nx * nx + ny * ny
-        const depth = 1 - dist2 * 0.2 // approximate vignette
+        const depth = 1 - dist2 * 0.2
         const depthSq = depth * depth
 
         // ── Sunlight ──
@@ -135,7 +167,6 @@ export function installWorld(Renderer) {
           bPurpStr = colPS[px]
         const depthNight = depthSq * nightDim
 
-        // Biome base colors are the dominant tint — amplified 3x for visibility
         let r =
           bRbase * 3.0 * nightDim +
           bright * 20 +
@@ -243,12 +274,75 @@ export function installWorld(Renderer) {
       ctx.closePath()
     }
 
-    // ── Outer void ──
+    // ── Outer void — dynamic sky gradient based on day/night cycle ──
+    // dayPhase: 0=dawn, 0.25=noon, 0.5=dusk, 0.75=midnight
+    const _dayPhase = sim.dayPhase || 0
+    const _sunInt = sim.sunIntensity || 1.0
+
+    // Sky color keyframes: [r, g, b] at each phase
+    // 0.00 = dawn (warm amber-pink horizon)
+    // 0.15 = morning (brightening blue)
+    // 0.25 = noon (soft sky blue)
+    // 0.40 = afternoon (warm blue)
+    // 0.50 = dusk (deep orange-purple)
+    // 0.65 = twilight (deep indigo)
+    // 0.75 = midnight (near-black indigo)
+    // 0.90 = pre-dawn (very dark blue-purple)
+    const _skyKeys = [
+      { p: 0.0, r: 45, g: 25, b: 18 }, // dawn — warm dark amber
+      { p: 0.1, r: 65, g: 35, b: 22 }, // sunrise — orange glow
+      { p: 0.2, r: 18, g: 28, b: 52 }, // morning — deepening blue
+      { p: 0.25, r: 12, g: 22, b: 48 }, // noon — rich dark blue
+      { p: 0.35, r: 14, g: 24, b: 46 }, // afternoon
+      { p: 0.45, r: 42, g: 18, b: 32 }, // pre-dusk — warming
+      { p: 0.5, r: 55, g: 20, b: 25 }, // dusk — deep red-orange
+      { p: 0.55, r: 35, g: 14, b: 35 }, // twilight — purple
+      { p: 0.65, r: 10, g: 6, b: 22 }, // deep twilight
+      { p: 0.75, r: 3, g: 2, b: 10 }, // midnight — near black
+      { p: 0.9, r: 8, g: 5, b: 16 }, // pre-dawn — hint of blue
+      { p: 1.0, r: 45, g: 25, b: 18 } // wraps to dawn
+    ]
+
+    // Interpolate sky color from keyframes
+    let _skyR = 3,
+      _skyG = 2,
+      _skyB = 10
+    for (let ki = 0; ki < _skyKeys.length - 1; ki++) {
+      const k0 = _skyKeys[ki],
+        k1 = _skyKeys[ki + 1]
+      if (_dayPhase >= k0.p && _dayPhase <= k1.p) {
+        const kf = k1.p - k0.p > 0 ? (_dayPhase - k0.p) / (k1.p - k0.p) : 0
+        // Smooth interpolation (smoothstep)
+        const sf = kf * kf * (3 - 2 * kf)
+        _skyR = k0.r + (k1.r - k0.r) * sf
+        _skyG = k0.g + (k1.g - k0.g) * sf
+        _skyB = k0.b + (k1.b - k0.b) * sf
+        break
+      }
+    }
+
+    // Edge color is darker version of sky
+    const _edgeR = (_skyR * 0.3) | 0
+    const _edgeG = (_skyG * 0.3) | 0
+    const _edgeB = (_skyB * 0.3) | 0
+
+    // Radial gradient from center (brighter sky) to edges (darker)
+    const _cx = cw * 0.5,
+      _cy = ch * 0.5
+    const _maxR = Math.sqrt(_cx * _cx + _cy * _cy)
+    const skyGrad = ctx.createRadialGradient(_cx, _cy, 0, _cx, _cy, _maxR)
+    skyGrad.addColorStop(0, `rgb(${_skyR | 0},${_skyG | 0},${_skyB | 0})`)
+    skyGrad.addColorStop(
+      0.6,
+      `rgb(${((_skyR + _edgeR) * 0.5) | 0},${((_skyG + _edgeG) * 0.5) | 0},${((_skyB + _edgeB) * 0.5) | 0})`
+    )
+    skyGrad.addColorStop(1, `rgb(${_edgeR},${_edgeG},${_edgeB})`)
+
     ctx.globalCompositeOperation = 'source-over'
     ctx.beginPath()
     ctx.rect(0, 0, cw, ch)
     drawBlobPathReverse(pts)
-    ctx.fillStyle = 'rgba(2,1,8,0.96)'
+    ctx.fillStyle = skyGrad
     ctx.fill()
 
     // ── Biome-tinted rim ──

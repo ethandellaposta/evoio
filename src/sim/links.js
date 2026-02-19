@@ -6,11 +6,24 @@ export function installLinks(Sim) {
 
   P._buildSpatialIndex = function () {
     const dist = this.cfg.linkDist
-    const cellSize = Math.max(dist * 1.4, 2)
+    // Cap grid resolution for large worlds — avoid 778K+ empty buckets
+    // Target ~200x200 = 40K max buckets
+    const maxBuckets = 40000
+    const area = this.w * this.h
+    const idealCellSize = Math.max(dist * 1.4, 2)
+    const idealBuckets = Math.ceil(this.w / idealCellSize) * Math.ceil(this.h / idealCellSize)
+    const cellSize = idealBuckets > maxBuckets ? Math.sqrt(area / maxBuckets) : idealCellSize
     const gw = Math.max(1, Math.ceil(this.w / cellSize))
     const gh = Math.max(1, Math.ceil(this.h / cellSize))
-    const grid = new Array(gw * gh)
-    for (let i = 0; i < grid.length; i++) grid[i] = []
+    const totalBuckets = gw * gh
+    // Reuse grid array between calls to reduce GC pressure
+    if (!this._spatialGrid || this._spatialGrid.length !== totalBuckets) {
+      this._spatialGrid = new Array(totalBuckets)
+      for (let i = 0; i < totalBuckets; i++) this._spatialGrid[i] = []
+    } else {
+      for (let i = 0; i < totalBuckets; i++) this._spatialGrid[i].length = 0
+    }
+    const grid = this._spatialGrid
     for (let i = 0; i < this.cells.length; i++) {
       const c = this.cells[i]
       let bx = Math.floor((c.x / this.w) * gw)
@@ -85,9 +98,18 @@ export function installLinks(Sim) {
       const j = nearest.idx
       const o = this.cells[j]
       if (c.linkCount >= this.cfg.linkMax || o.linkCount >= this.cfg.linkMax) continue
+      // Diffusion limit: organisms beyond ~20 cells can't sustain more growth without vasculature
+      if (c.organismSize >= 20 || o.organismSize >= 20) continue
 
       const gamma = this._surfaceTension(c, o)
-      const adhesionAvg = (c.g.adhesion + o.g.adhesion) * 0.5
+      // Staps/Tarnita adhesion co-option: environmental responsiveness
+      // _adhesionBoost is set by step.js based on local food conditions
+      const boostC = c._adhesionBoost || 0
+      const boostO = o._adhesionBoost || 0
+      const adhesionAvg = Math.max(
+        0,
+        Math.min(1, (c.g.adhesion + o.g.adhesion) * 0.5 + (boostC + boostO) * 0.5)
+      )
       const p = 0.02 + 0.22 * adhesionAvg * (0.5 + gamma)
       if (this.rng() > p) continue
 
@@ -114,6 +136,12 @@ export function installLinks(Sim) {
       const b = this.cells[l.b]
       if (!a || !b) continue
       if (a.clade !== b.clade) {
+        a.linkCount = Math.max(0, a.linkCount - 1)
+        b.linkCount = Math.max(0, b.linkCount - 1)
+        continue
+      }
+      // Staps/Tarnita life cycle: fragmented cells sever all links
+      if (a._fragmented || b._fragmented) {
         a.linkCount = Math.max(0, a.linkCount - 1)
         b.linkCount = Math.max(0, b.linkCount - 1)
         continue

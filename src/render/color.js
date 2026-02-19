@@ -22,14 +22,14 @@ export function cladeHue(clade) {
   return (clade * golden) % 360
 }
 
-// Per-clade saturation offset: returns -15 to +15
+// Per-clade saturation offset: returns -22 to +22
 export function cladeSatOffset(clade) {
-  return ((clade * 73.137) % 30) - 15
+  return ((clade * 73.137) % 44) - 22
 }
 
-// Per-clade luminance offset: returns -10 to +10
+// Per-clade luminance offset: returns -16 to +16
 export function cladeLumOffset(clade) {
-  return ((clade * 51.923) % 20) - 10
+  return ((clade * 51.923) % 32) - 16
 }
 
 export function cladeColor(clade) {

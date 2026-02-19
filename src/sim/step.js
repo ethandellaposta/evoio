@@ -14,7 +14,12 @@ import {
   FOOD_MINERAL,
   FOOD_MEAT
 } from './constants.js'
-import { batch_food_sense } from '../../pkg/evoio_wasm.js'
+import { batch_food_sense, gas_grid_diffuse, batch_neighbor_forces } from '../../pkg/evoio_wasm.js'
+
+// Reusable object for _computeChemotaxis return — avoids per-cell GC allocation
+const _chemoResult = { cx: 0, cy: 0, strength: 0 }
+// Flat direction arrays for chemotaxis: [dx0..dx7, dy0..dy7]
+const _chemoDirs = [1, -1, 0, 0, 1, -1, 1, -1, 0, 0, 1, -1, 1, 1, -1, -1]
 
 export function installStep(Sim, getWasmReady) {
   const P = Sim.prototype
@@ -38,20 +43,10 @@ export function installStep(Sim, getWasmReady) {
       sumGy = 0,
       sumG = 0
     const here = this._sampleGradient(c.x, c.y)
-    const dirs = [
-      [1, 0],
-      [-1, 0],
-      [0, 1],
-      [0, -1],
-      [1, 1],
-      [-1, 1],
-      [1, -1],
-      [-1, -1]
-    ]
-    for (const [dx, dy] of dirs) {
-      const sx = c.x + dx * senseRadius
-      const sy = c.y + dy * senseRadius
-      const g = this._sampleGradient(sx, sy)
+    for (let di = 0; di < 8; di++) {
+      const dx = _chemoDirs[di],
+        dy = _chemoDirs[di + 8]
+      const g = this._sampleGradient(c.x + dx * senseRadius, c.y + dy * senseRadius)
       if (g > here) {
         sumGx += dx * (g - here)
         sumGy += dy * (g - here)
@@ -61,7 +56,10 @@ export function installStep(Sim, getWasmReady) {
     const len = Math.sqrt(sumGx * sumGx + sumGy * sumGy) || 1
     c.chemoVec.x = sumGx / len
     c.chemoVec.y = sumGy / len
-    return { cx: c.chemoVec.x, cy: c.chemoVec.y, strength: sumG / 8 }
+    _chemoResult.cx = c.chemoVec.x
+    _chemoResult.cy = c.chemoVec.y
+    _chemoResult.strength = sumG * 0.125
+    return _chemoResult
   }
 
   // Find a compatible mate for sexual reproduction
@@ -156,6 +154,15 @@ export function installStep(Sim, getWasmReady) {
   }
 
   P.step = function () {
+    const _st = performance.now()
+    let _sl = _st
+    const _sp = {}
+    const _sm = (name) => {
+      const _n = performance.now()
+      _sp[name] = +(_n - _sl).toFixed(3)
+      _sl = _n
+    }
+
     this.t += 1
     this.seasonTick++
 
@@ -181,21 +188,92 @@ export function installStep(Sim, getWasmReady) {
     }
 
     const popNow = this.cells.length
-    const envStride = popNow > 2500 ? 4 : popNow > 1200 ? 2 : 1
+    // World area scale factor: at 5x world size, area is 25x, so strides scale up
+    // Reference area: 1920*960 = 1,843,200 pixels
+    const _worldArea = this.w * this.h
+    const _areaScale = Math.max(1, Math.round(_worldArea / 1843200))
+    const envStride = (popNow > 4000 ? 8 : popNow > 2500 ? 4 : popNow > 1200 ? 2 : 1) * _areaScale
 
     if (this.t % envStride === 0) this._growFood(envStride, foodScarcity, this.sunIntensity)
     if (this.t % (2 * envStride) === 0) this._diffuseStep()
-    if (this.t % 4 === 0) this._growMinerals()
+    if (this.t % (4 * _areaScale) === 0) this._growMinerals()
     if (this.t % 4 === 0) this._depositSeeds()
-    if (this.t % 4 === 0) this._driftFood()
-    if (this.t % 8 === 0) this._decayMeat()
-    if (this.t % 16 === 0) this._updateCladeStats()
-    const predStride = popNow > 1500 ? 3 : popNow > 800 ? 2 : 1
+    if (this.t % (4 * _areaScale) === 0) this._driftFood()
+    if (this.t % (8 * _areaScale) === 0) this._decayMeat()
+    if (this.t % (8 * _areaScale) === 0) this._growShelter()
+    if (this.t % (2 * _areaScale) === 0) this._decayAlarm()
+    const _cladeStatsStride = popNow > 8000 ? 64 : popNow > 4000 ? 32 : 16
+    if (this.t % _cladeStatsStride === 0) this._updateCladeStats()
+
+    // ── Gas grid diffusion & ambient replenishment ──
+    const gasStride = (popNow > 3000 ? 16 : 8) * _areaScale
+    if (this.t % gasStride === 0) {
+      const gw = this.gasW,
+        gh = this.gasH
+      if (getWasmReady()) {
+        // WASM path: offload entire gas diffusion + replenishment to Rust
+        gas_grid_diffuse(
+          this.o2Grid,
+          this.co2Grid,
+          gw,
+          gh,
+          0.15, // o2 diffusion rate
+          0.15, // co2 diffusion rate
+          0.8, // ambient O2 target
+          0.004, // ambient replenish rate (~0.003 equivalent)
+          0.003 // co2 decay rate (~0.002 equivalent)
+        )
+      } else {
+        // JS fallback
+        const o2 = this.o2Grid,
+          co2 = this.co2Grid
+        const parity = (this.t >> 3) & 1
+        for (let y = 0; y < gh; y++) {
+          for (let x = parity; x < gw; x += 2) {
+            const idx = x + y * gw
+            let sumO2 = o2[idx] * 4,
+              sumCO2 = co2[idx] * 4,
+              n = 4
+            if (x > 0) {
+              sumO2 += o2[idx - 1]
+              sumCO2 += co2[idx - 1]
+              n++
+            }
+            if (x < gw - 1) {
+              sumO2 += o2[idx + 1]
+              sumCO2 += co2[idx + 1]
+              n++
+            }
+            if (y > 0) {
+              sumO2 += o2[idx - gw]
+              sumCO2 += co2[idx - gw]
+              n++
+            }
+            if (y < gh - 1) {
+              sumO2 += o2[idx + gw]
+              sumCO2 += co2[idx + gw]
+              n++
+            }
+            o2[idx] = sumO2 / n
+            co2[idx] = sumCO2 / n
+          }
+        }
+        for (let i = 0; i < gw * gh; i++) {
+          o2[i] = Math.min(1.5, o2[i] + 0.003)
+          co2[i] = Math.max(0, co2[i] - 0.002)
+        }
+      }
+    }
+    _sm('environment')
+
+    const predStride =
+      popNow > 8000 ? 6 : popNow > 5000 ? 5 : popNow > 3000 ? 4 : popNow > 1500 ? 3 : popNow > 800 ? 2 : 1
 
     const maxOrganisms = this.cfg.maxOrganisms | 0
     const orgCount = this.organismCount || this.cells.length
 
     const spatial = this._buildSpatialIndex()
+    _sm('spatial')
     if (this.t % 8 === 0) {
       this._assignRoles(spatial)
     }
@@ -244,22 +322,275 @@ export function installStep(Sim, getWasmReady) {
       )
     }
 
+    _sm('foodSense')
+
+    // Hoist stride computations out of per-cell loop
+    const orgStride =
+      startCount > 10000
+        ? 8
+        : startCount > 6000
+          ? 6
+          : startCount > 4000
+            ? 4
+            : startCount > 3000
+              ? 3
+              : startCount > 600
+                ? 2
+                : 1
+    const _flockStride =
+      startCount > 12000
+        ? 20
+        : startCount > 8000
+          ? 16
+          : startCount > 6000
+            ? 12
+            : startCount > 4000
+              ? 8
+              : startCount > 3000
+                ? 6
+                : startCount > 2000
+                  ? 5
+                  : startCount > 1500
+                    ? 4
+                    : startCount > 800
+                      ? 3
+                      : startCount < 400
+                        ? 1
+                        : 2
+    const _predStride2 =
+      startCount > 12000
+        ? 16
+        : startCount > 8000
+          ? 12
+          : startCount > 6000
+            ? 10
+            : startCount > 4000
+              ? 8
+              : startCount > 3000
+                ? 6
+                : startCount > 2000
+                  ? 5
+                  : startCount > 1500
+                    ? 4
+                    : 3
+    const _chemoStride =
+      startCount > 6000
+        ? 12
+        : startCount > 4000
+          ? 10
+          : startCount > 3000
+            ? 8
+            : startCount > 2000
+              ? 6
+              : startCount > 1200
+                ? 5
+                : startCount > 600
+                  ? 4
+                  : 3
+    const _alarmStride =
+      startCount > 6000 ? 16 : startCount > 3000 ? 12 : startCount > 2000 ? 8 : startCount > 1000 ? 6 : 3
+    const _symbStride = startCount > 6000 ? 20 : startCount > 3000 ? 16 : startCount > 2000 ? 12 : 6
+    const _tick = this.t
+
+    // Hoist sunlight trig outside cell loop (was recomputed per _sampleSunlight call)
+    const _sunCos = Math.cos(this.sunAngle)
+    const _sunSin = Math.sin(this.sunAngle)
+    const _sunIntensity = this.sunIntensity
+    const _wcx = this.w * 0.5
+    const _wcy = this.h * 0.5
+    const _invHalfW = 1.0 / _wcx
+    const _invHalfH = 1.0 / _wcy
+
+    // Hoist biome array outside cell loop
+    const _biomes = this.cfg.biomes
+    const _numBiomes = _biomes ? _biomes.length : 0
+    const _biomeRegionW = _numBiomes > 0 ? this.w / _numBiomes : this.w
+
+    // Hoist world dims
+    const _w = this.w
+    const _h = this.h
+
+    // ── Cell loop sub-timing accumulators ──
+    // Sample every 16th cell to keep overhead low (~0.25ms at 20K cells).
+    // Uses running _cl_t0 that carries across phases so no time leaks.
+    const _CL_SAMPLE = 16
+    let _cl_moveT = 0,
+      _cl_feedT = 0,
+      _cl_metabT = 0,
+      _cl_lifeT = 0
+    let _cl_t0 = performance.now()
+
+    // Hoist spatial grid outside cell loop — avoids destructuring per flocking/predAI block
+    const _sgrid = spatial.grid,
+      _sgw = spatial.gw,
+      _sgh = spatial.gh
+    const _halfW = _w * 0.5,
+      _halfH = _h * 0.5
+    const _persistInterval = this.cfg.persistenceInterval
+    const _contactInhibition = this.cfg.contactInhibition
+    const _baseMove = this.cfg.baseMove
+    const _gradientWeight = this.cfg.gradientWeight
+    const _persistStr = this.cfg.persistenceStrength
+    const _moveWander = this.cfg.moveWander
+    const _metabolismBase = this.cfg.metabolismBase
+    const _dt = this.cfg.dt
+    const _gasW = this.gasW
+    const _gasH = this.gasH
+    const _gasWm1 = _gasW - 1
+    const _gasHm1 = _gasH - 1
+    const _o2Grid = this.o2Grid
+    const _co2Grid = this.co2Grid
+    const _gPeaks = this.gradientPeaks || [this.gradientPeak]
+    const _nGPeaks = _gPeaks.length
+    const _uptake = this.cfg.uptake
+    const _meatDropEnergy = this.cfg.meatDropEnergy
+    const _splitWorld = this.splitWorld || null
+    const _gasTickStride = startCount > 3000 ? 8 : startCount > 2000 ? 6 : 4
+    const _densStride = startCount > 2000 ? 12 : 8
+
+    // ── WASM batch neighbor forces (flocking + predator-prey in one pass) ──
+    // Replaces two separate JS spatial grid scans with a single compiled Rust pass.
+    let _nbrOut = null // Float32Array, 8 floats per cell
+    const _useWasmNbr = getWasmReady() && startCount > 200
+    if (_useWasmNbr) {
+      try {
+        // Build flat spatial grid for WASM: bucket_offsets, bucket_sizes, flat_grid
+        const _nBuckets = _sgw * _sgh
+        // Reuse/grow buffers
+        if (!this._nbrBufs || this._nbrBufs.nBuckets < _nBuckets || this._nbrBufs.nCells < startCount) {
+          const nb = Math.max(_nBuckets, 256)
+          const nc = Math.max(startCount, 512)
+          this._nbrBufs = {
+            nBuckets: nb,
+            nCells: nc,
+            offsets: new Float32Array(nb),
+            sizes: new Float32Array(nb),
+            flatGrid: new Float32Array(nc + 256),
+            cx: new Float32Array(nc),
+            cy: new Float32Array(nc),
+            cvx: new Float32Array(nc),
+            cvy: new Float32Array(nc),
+            clade: new Float32Array(nc),
+            diet: new Float32Array(nc),
+            energy: new Float32Array(nc),
+            sense: new Float32Array(nc),
+            social: new Float32Array(nc),
+            speed: new Float32Array(nc),
+            flags: new Float32Array(nc)
+          }
+        }
+        const nb = this._nbrBufs
+        // Fill bucket offsets/sizes from spatial grid
+        let flatIdx = 0
+        for (let bi = 0; bi < _nBuckets; bi++) {
+          const bucket = _sgrid[bi]
+          nb.offsets[bi] = flatIdx
+          nb.sizes[bi] = bucket ? bucket.length : 0
+          if (bucket) {
+            // Grow flatGrid if needed
+            if (flatIdx + bucket.length > nb.flatGrid.length) {
+              const newFG = new Float32Array((flatIdx + bucket.length) * 2)
+              newFG.set(nb.flatGrid)
+              nb.flatGrid = newFG
+            }
+            for (let k = 0; k < bucket.length; k++) {
+              nb.flatGrid[flatIdx++] = bucket[k]
+            }
+          }
+        }
+        // Fill per-cell data arrays
+        const popScale = startCount > 3000 ? 0.55 : startCount > 2000 ? 0.7 : startCount > 1500 ? 0.85 : 1.0
+        for (let i = 0; i < startCount; i++) {
+          const c = this.cells[i]
+          nb.cx[i] = c.x
+          nb.cy[i] = c.y
+          nb.cvx[i] = c.vx
+          nb.cvy[i] = c.vy
+          nb.clade[i] = c.clade
+          nb.diet[i] = c.g.diet
+          nb.energy[i] = c.energy
+          const recBonus = c.organelles[ORGANELLE_RECEPTOR]
+          const eyeB = (c.g.eyespot || 0) > 0.1 ? 1.0 + (c.g.eyespot || 0) : 1.0
+          nb.sense[i] = c.g.sense * (1 + recBonus * 1.2) * eyeB
+          const epiSocial = ((c.g.epiMarks || {}).socialPriming || 0) * 0.2
+          const sigBoost = (c.g.signaling || 0) * 0.15
+          nb.social[i] = Math.min(1, (c.g.sociality ?? 0.3) + epiSocial + sigBoost)
+          const flagBonus = c.organelles[ORGANELLE_FLAGELLUM]
+          nb.speed[i] = c.g.speed * (1 + flagBonus * 0.8)
+          // Flags: bit0=do_flock, bit1=do_pred
+          let fl = 0
+          if ((i + _tick) % _flockStride === 0) fl |= 1
+          if ((i + _tick) % _predStride2 === 0 && startCount > 5) fl |= 2
+          nb.flags[i] = fl
+        }
+        const sr = startCount > 2000 ? 1 : 2
+        // Allocate fresh output buffer each call (wasm-bindgen detaches by-value Float32Array)
+        const _nbrOutBuf = new Float32Array(startCount * 8)
+        _nbrOut = batch_neighbor_forces(
+          nb.cx.subarray(0, startCount),
+          nb.cy.subarray(0, startCount),
+          nb.cvx.subarray(0, startCount),
+          nb.cvy.subarray(0, startCount),
+          nb.clade.subarray(0, startCount),
+          nb.diet.subarray(0, startCount),
+          nb.energy.subarray(0, startCount),
+          nb.sense.subarray(0, startCount),
+          nb.social.subarray(0, startCount),
+          nb.speed.subarray(0, startCount),
+          nb.flags.subarray(0, startCount),
+          nb.flatGrid.subarray(0, flatIdx),
+          nb.offsets.subarray(0, _nBuckets),
+          nb.sizes.subarray(0, _nBuckets),
+          _sgw,
+          _sgh,
+          _w,
+          _h,
+          popScale,
+          sr,
+          _nbrOutBuf
+        )
+      } catch (e) {
+        // WASM failed — fall back to JS path
+        if (!this._nbrWarnShown) {
+          console.warn('batch_neighbor_forces WASM failed, using JS fallback:', e)
+          this._nbrWarnShown = true
+        }
+        _nbrOut = null
+      }
+    }
+
+    // ── Migratory trig LUT: precompute cos/sin for 256 angle slots ──
+    if (!this._migrLUT) {
+      const LUT_N = 256
+      this._migrLUT = { cos: new Float32Array(LUT_N), sin: new Float32Array(LUT_N) }
+      for (let i = 0; i < LUT_N; i++) {
+        const a = (i / LUT_N) * Math.PI * 2
+        this._migrLUT.cos[i] = Math.cos(a)
+        this._migrLUT.sin[i] = Math.sin(a)
+      }
+    }
+    const _migrCos = this._migrLUT.cos
+    const _migrSin = this._migrLUT.sin
+    const _migrN = 256
+
     for (let i = 0; i < startCount; i++) {
       const c = this.cells[i]
       c.age++
       c.membranePhase += 0.03 + 0.02 * c.g.speed
 
-      if (startCount < 600 || (i + this.t) % 2 === 0) this._developOrganelles(c)
+      if ((i + _tick) % orgStride === 0) this._developOrganelles(c)
 
-      // Guard against NaN organelles
-      for (let _oi = 0; _oi < ORGANELLE_COUNT; _oi++) {
-        if (!isFinite(c.organelles[_oi])) c.organelles[_oi] = 0
+      // Guard against NaN organelles — only check every 16 ticks to reduce overhead
+      if ((c.age & 15) === 0) {
+        for (let _oi = 0; _oi < ORGANELLE_COUNT; _oi++) {
+          if (!isFinite(c.organelles[_oi])) c.organelles[_oi] = 0
+        }
       }
 
-      if (c.age % 8 === 0) {
+      if (c.age % 16 === 0) {
         let orgSum = 0
         for (let oi = 0; oi < ORGANELLE_COUNT; oi++) orgSum += c.organelles[oi]
-        const orgBonus = orgSum * 0.003
+        const orgBonus = orgSum * 0.006
         const linkBonus = c.linkCount * 0.005
         const roleBonus = c.role !== ROLE_NONE ? 0.004 : 0
         const morphBonus =
@@ -271,21 +602,61 @@ export function installStep(Sim, getWasmReady) {
             (c.g.biolum || 0) +
             (c.g.vesicles || 0)) *
           0.002
-        c.complexity = Math.min(c.complexity + orgBonus + linkBonus + roleBonus + morphBonus, 10.0)
+        // Genome architecture contributes to complexity
+        const regBonus = (c.g.regulatoryComplexity || 0) * 0.008
+        const genomeSizeBonus = Math.max(0, (c.g.genomeSize || 1) - 1) * 0.003
+        const ploidyBonus = ((c.g.ploidy || 1) - 1) * 0.005
+        c.complexity = Math.min(
+          c.complexity +
+            orgBonus +
+            linkBonus +
+            roleBonus +
+            morphBonus +
+            regBonus +
+            genomeSizeBonus +
+            ploidyBonus,
+          10.0
+        )
       }
-
-      this._updatePersistence(c)
 
       const mitoBonus = c.organelles[ORGANELLE_MITOCHONDRIA]
       const flagBonus = c.organelles[ORGANELLE_FLAGELLUM]
       const recBonus = c.organelles[ORGANELLE_RECEPTOR]
       const vacBonus = c.organelles[ORGANELLE_VACUOLE]
 
+      // ── Developmental timing (heterochrony) ──
+      // Traits develop gradually based on age and growthRate gene.
+      // devTiming controls maturation schedule: low = precocial (early), high = altricial (late).
+      // Scientific basis: Gould 1977 — heterochronic shifts drive major evolutionary transitions.
+      const devTime = c.g.devTiming || 0.5
+      const gRate = c.g.growthRate || 0.5
+      const maturity = Math.min(1.0, (c.age / (80 + devTime * 200)) * (0.5 + gRate))
+      // Phenotypic plasticity: environment modulates effective gene expression
+      // Scientific basis: West-Eberhard 2003 — developmental plasticity and evolution.
+      const plast = c.g.plasticity || 0.15
+      const localFood = c._cachedDensity !== undefined ? 1.0 : 1.0 // placeholder for env signal
+      // Plasticity allows partial compensation for poor genes in good environments
+      const plasticMod = 1.0 + plast * 0.1 * (localFood - 0.5)
+
+      // Ploidy: diploid/polyploid organisms have gene redundancy (masking deleterious alleles)
+      // Scientific basis: Crow & Kimura — diploid advantage via heterozygosity.
+      const ploidyMask = Math.min(0.3, ((c.g.ploidy || 1) - 1) * 0.15)
+
+      // Regulatory complexity: better gene regulation = more efficient phenotype expression
+      // Scientific basis: Carroll 2005 — cis-regulatory evolution drives morphological
+      // diversity. More regulatory elements = finer control over gene expression timing,
+      // tissue specificity, and dosage. This is the key difference between complex and
+      // simple organisms (humans and nematodes have similar gene counts but vastly
+      // different regulatory complexity).
+      const regBoost = 1.0 + (c.g.regulatoryComplexity || 0) * 0.25
+
       // Eyespot: doubles effective sense range (stigma/photoreceptor)
       const eyespotBonus = (c.g.eyespot || 0) > 0.1 ? 1.0 + (c.g.eyespot || 0) * 1.0 : 1.0
-      const sense = c.g.sense * (1 + recBonus * 1.2) * eyespotBonus
-      const speed = c.g.speed * (1 + flagBonus * 0.8)
-      const metabolism = c.g.metabolism * (1 - mitoBonus * 0.35)
+      const sense = c.g.sense * (1 + recBonus * 1.2) * eyespotBonus * maturity * regBoost
+      const speed = c.g.speed * (1 + flagBonus * 0.8) * (0.7 + maturity * 0.3)
+      const metabolism = c.g.metabolism * (1 - mitoBonus * 0.35) * plasticMod
+      // Ploidy masks some drift load damage
+      const effectiveDriftLoad = Math.max(0, (c.g.driftLoad || 0) - ploidyMask)
       const divisionThreshold = c.g.division * (1 - vacBonus * 0.15)
 
       const flagellaBoost = c.g.flagella * 0.8
@@ -295,16 +666,36 @@ export function installStep(Sim, getWasmReady) {
       const paddleFinBoost = (c.g.paddleFin || 0) * 0.7
       const membraneDrag = c.g.membrane * 0.15
       const elongDrag = (c.g.elongation || 0) * 0.08
-      const bodySizeDrag = Math.max(0, (c.g.bodyScale || 1) - 1) * 0.06
+      const bodySizeDrag = Math.max(0, (c.g.bodyScale || 1) - 1) * 0.03
       const spinesCost = c.g.spines * 0.002
       const camoEnergyCost = c.g.camouflage * 0.001
       if (c.jetCooldown > 0) c.jetCooldown--
       if (c.toxinTimer > 0) c.toxinTimer--
 
-      const skipChemo = startCount > 400 && (i + this.t) % 3 !== 0
-      const chemo = skipChemo
-        ? { cx: c.chemoVec.x, cy: c.chemoVec.y, strength: 0 }
-        : this._computeChemotaxis(c)
+      // Cache velocity magnitude — used 5+ times per cell
+      const _cvx = c.vx,
+        _cvy = c.vy
+      const _vLenSq = _cvx * _cvx + _cvy * _cvy
+      const _vLen = _vLenSq > 0.000001 ? Math.sqrt(_vLenSq) : 0.001
+
+      // Inlined _updatePersistence — reuses cached _vLen instead of recomputing sqrt
+      if (++c.persistTimer >= _persistInterval) {
+        c.persistTimer = 0
+        if (_vLen > 0.001) {
+          c.persistDir.x = _cvx / _vLen
+          c.persistDir.y = _cvy / _vLen
+        }
+      }
+
+      const skipChemo = startCount > 400 && (i + _tick) % _chemoStride !== 0
+      if (skipChemo) {
+        _chemoResult.cx = c.chemoVec.x
+        _chemoResult.cy = c.chemoVec.y
+        _chemoResult.strength = 0
+      } else {
+        this._computeChemotaxis(c)
+      }
+      const chemo = _chemoResult
 
       const herbivoreAff = 1 - c.g.diet
       const carnivoreAff = c.g.diet
@@ -360,14 +751,13 @@ export function installStep(Sim, getWasmReady) {
       // Stalk: anchored cells barely move
       const stalkDrag = (c.g.stalk || 0) * 0.7
       const moveAmt =
-        this.cfg.baseMove * speed * (1 - membraneDrag - elongDrag - bodySizeDrag - shellDrag - stalkDrag)
-      const gw = this.cfg.gradientWeight
+        _baseMove * speed * (1 - membraneDrag - elongDrag - bodySizeDrag - shellDrag - stalkDrag)
       // Cilia: maneuverability — ciliated cells turn faster (reduced persistence lock)
       const ciliaAgility = c.g.cilia > 0.15 ? 1.0 - c.g.cilia * 0.4 : 1.0
-      const persist = c.g.persistence * this.cfg.persistenceStrength * ciliaAgility
+      const persist = c.g.persistence * _persistStr * ciliaAgility
 
       const cilFactor =
-        c.contactCount > 0 ? Math.max(0.5, 1 - this.cfg.contactInhibition * Math.min(c.contactCount, 4)) : 1.0
+        c.contactCount > 0 ? Math.max(0.5, 1 - _contactInhibition * Math.min(c.contactCount, 4)) : 1.0
 
       let roleSpeedMod = 1.0
       if (c.role === ROLE_PIONEER) roleSpeedMod = 1.3
@@ -375,174 +765,320 @@ export function installStep(Sim, getWasmReady) {
       else if (c.role === ROLE_EDGE) roleSpeedMod = 1.1
 
       const bold = c.g.boldness ?? 0.5
-      const social = c.g.sociality ?? 0.3
+      // Epigenetic modulation of sociality: social priming mark boosts effective sociality
+      const epiSocial = ((c.g.epiMarks || {}).socialPriming || 0) * 0.2
+      // Cell signaling boosts effective sociality (quorum sensing / morphogen coordination)
+      const sigBoost = (c.g.signaling || 0) * 0.15
+      const social = Math.min(1, (c.g.sociality ?? 0.3) + epiSocial + sigBoost)
 
-      const foodW = gw * (0.3 + bold * 0.4)
-      const chemoW = gw * (0.3 + bold * 0.2)
-      const wanderW = (1 - gw) * (1.2 - bold * 0.4)
+      const foodW = _gradientWeight * (0.3 + bold * 0.4)
+      const chemoW = _gradientWeight * (0.3 + bold * 0.2)
+      const wanderW = (1 - _gradientWeight) * (1.2 - bold * 0.4)
       let wx =
-        wanderW * randNorm(this.rng) * this.cfg.moveWander +
+        wanderW * randNorm(this.rng) * _moveWander +
         foodW * bfx +
         chemoW * chemo.cx +
         persist * c.persistDir.x
       let wy =
-        wanderW * randNorm(this.rng) * this.cfg.moveWander +
+        wanderW * randNorm(this.rng) * _moveWander +
         foodW * bfy +
         chemoW * chemo.cy +
         persist * c.persistDir.y
 
-      if (social > 0.15 && c.linkCount === 0 && (startCount < 600 || (i + this.t) % 2 === 0)) {
-        // Flocking: loose cohesion + separation so species members stay in the
-        // same region without collapsing into a single lockstep blob.
-        // Inspired by Boids: attract when far, repel when too close, align headings.
-        let cohX = 0,
-          cohY = 0,
-          sepX = 0,
-          sepY = 0,
-          aliX = 0,
-          aliY = 0
-        let nNear = 0
-        const searchR = 12 + social * 20
-        const searchR2 = searchR * searchR
-        const comfortR = 4 + social * 4 // personal space radius
-        const comfortR2 = comfortR * comfortR
-        const scanW = startCount > 1000 ? 15 : 30
-        for (let j = Math.max(0, i - scanW); j < Math.min(startCount, i + scanW); j++) {
-          if (j === i) continue
-          const other = this.cells[j]
-          if (other.clade !== c.clade) continue
-          let ddx = other.x - c.x,
-            ddy = other.y - c.y
-          if (ddx > this.w / 2) ddx -= this.w
-          else if (ddx < -this.w / 2) ddx += this.w
-          if (ddy > this.h / 2) ddy -= this.h
-          else if (ddy < -this.h / 2) ddy += this.h
-          const d2 = ddx * ddx + ddy * ddy
-          if (d2 > searchR2 || d2 < 0.01) continue
-          const dist = Math.sqrt(d2)
-          nNear++
-          // Cohesion: gentle pull toward neighbor (weakens as they get closer)
-          const cohStr = Math.max(0, dist - comfortR) / searchR
-          cohX += (ddx / dist) * cohStr
-          cohY += (ddy / dist) * cohStr
-          // Separation: push away when inside comfort zone
-          if (d2 < comfortR2) {
-            const sepStr = (comfortR - dist) / comfortR
-            sepX -= (ddx / dist) * sepStr
-            sepY -= (ddy / dist) * sepStr
-          }
-          // Alignment: loosely match heading of neighbors
-          aliX += other.vx
-          aliY += other.vy
+      // ── Conspecific flocking + Predator-prey AI ──
+      // WASM path: read pre-computed vectors from batch_neighbor_forces
+      // JS fallback: original spatial grid scan (for small pop or no WASM)
+      if (_nbrOut) {
+        // WASM results: [flockX, flockY, fleeX, fleeY, chaseX, chaseY, nNear, _]
+        const _oi8 = i * 8
+        wx += _nbrOut[_oi8]
+        wy += _nbrOut[_oi8 + 1]
+        if ((i + _tick) % _predStride2 === 0 && startCount > 5) {
+          c._fleeX = _nbrOut[_oi8 + 2]
+          c._fleeY = _nbrOut[_oi8 + 3]
+          c._chaseX = _nbrOut[_oi8 + 4]
+          c._chaseY = _nbrOut[_oi8 + 5]
         }
-        if (nNear > 0) {
-          const inv = 1 / nNear
-          // Cohesion — weak pull to keep species in same area
-          wx += cohX * inv * social * 0.15
-          wy += cohY * inv * social * 0.15
-          // Separation — prevent clumping
-          wx += sepX * inv * social * 0.25
-          wy += sepY * inv * social * 0.25
-          // Alignment — subtle heading match (much weaker than cohesion)
-          const aliLen = Math.sqrt(aliX * aliX + aliY * aliY) || 1
-          wx += (aliX / aliLen) * social * 0.06
-          wy += (aliY / aliLen) * social * 0.06
+      } else {
+        // JS fallback: flocking
+        if ((i + _tick) % _flockStride === 0) {
+          const isHerb = c.g.diet < 0.4
+          const isCarn = c.g.diet > 0.6
+          const herdDrive = isHerb ? 0.3 + social * 0.7 : isCarn ? social * 0.6 : social * 0.4
+          if (herdDrive > 0.1) {
+            let cohX = 0,
+              cohY = 0,
+              sepX = 0,
+              sepY = 0,
+              aliX = 0,
+              aliY = 0
+            let nNear = 0
+            const popScale =
+              startCount > 3000 ? 0.55 : startCount > 2000 ? 0.7 : startCount > 1500 ? 0.85 : 1.0
+            const searchR = (isHerb ? 20 + social * 25 : 12 + social * 15) * popScale
+            const searchR2 = searchR * searchR
+            const comfortR = isHerb ? 3 + social * 2 : 5 + social * 4
+            const comfortR2 = comfortR * comfortR
+            let bx2 = Math.floor((c.x / _w) * _sgw)
+            let by2 = Math.floor((c.y / _h) * _sgh)
+            if (!(bx2 >= 0 && bx2 < _sgw)) bx2 = 0
+            if (!(by2 >= 0 && by2 < _sgh)) by2 = 0
+            const sr = startCount > 2000 ? 1 : 2
+            for (let oy = -sr; oy <= sr; oy++) {
+              for (let ox = -sr; ox <= sr; ox++) {
+                const gx = (((bx2 + ox) % _sgw) + _sgw) % _sgw
+                const gy = (((by2 + oy) % _sgh) + _sgh) % _sgh
+                const bucket = _sgrid[gx + gy * _sgw]
+                for (let k = 0; k < bucket.length; k++) {
+                  const j = bucket[k]
+                  if (j === i) continue
+                  const other = this.cells[j]
+                  if (other.clade !== c.clade) continue
+                  const ddx = torusDelta(other.x - c.x, _w)
+                  const ddy = torusDelta(other.y - c.y, _h)
+                  const d2 = ddx * ddx + ddy * ddy
+                  if (d2 > searchR2 || d2 < 0.01) continue
+                  const dist = Math.sqrt(d2)
+                  nNear++
+                  const nx = ddx / dist,
+                    ny = ddy / dist
+                  const cohStr = Math.max(0, dist - comfortR) / searchR
+                  cohX += nx * cohStr
+                  cohY += ny * cohStr
+                  if (d2 < comfortR2) {
+                    const sepStr = (comfortR - dist) / comfortR
+                    sepX -= nx * sepStr
+                    sepY -= ny * sepStr
+                  }
+                  aliX += other.vx
+                  aliY += other.vy
+                }
+              }
+            }
+            if (nNear > 0) {
+              const inv = 1 / nNear
+              wx += cohX * inv * herdDrive * 0.5
+              wy += cohY * inv * herdDrive * 0.5
+              wx += sepX * inv * herdDrive * 0.35
+              wy += sepY * inv * herdDrive * 0.35
+              const aliLen = Math.sqrt(aliX * aliX + aliY * aliY) || 1
+              const aliStr = isCarn ? 0.2 : 0.1
+              wx += (aliX / aliLen) * herdDrive * aliStr
+              wy += (aliY / aliLen) * herdDrive * aliStr
+            }
+          }
+        }
+        // JS fallback: predator-prey AI
+        if ((i + _tick) % _predStride2 === 0 && startCount > 5) {
+          let fleeX = 0,
+            fleeY = 0
+          let chaseX = 0,
+            chaseY = 0
+          const senseR = (sense * 2.5 + 4) * (1 + recBonus * 0.5)
+          const senseR2 = senseR * senseR
+          let _pbx = Math.floor((c.x / _w) * _sgw)
+          let _pby = Math.floor((c.y / _h) * _sgh)
+          if (!(_pbx >= 0 && _pbx < _sgw)) _pbx = 0
+          if (!(_pby >= 0 && _pby < _sgh)) _pby = 0
+          const _psr = startCount > 2000 ? 1 : 2
+          for (let _poy = -_psr; _poy <= _psr; _poy++) {
+            for (let _pox = -_psr; _pox <= _psr; _pox++) {
+              const _pgx = (((_pbx + _pox) % _sgw) + _sgw) % _sgw
+              const _pgy = (((_pby + _poy) % _sgh) + _sgh) % _sgh
+              const _pbucket = _sgrid[_pgx + _pgy * _sgw]
+              for (let _pk = 0; _pk < _pbucket.length; _pk++) {
+                const j = _pbucket[_pk]
+                if (j === i) continue
+                const o = this.cells[j]
+                if (o.clade === c.clade) continue
+                const ddx = torusDelta(o.x - c.x, _w)
+                const ddy = torusDelta(o.y - c.y, _h)
+                const d2 = ddx * ddx + ddy * ddy
+                if (d2 > senseR2 || d2 < 0.01) continue
+                const dist = Math.sqrt(d2)
+                const nx = ddx / dist,
+                  ny = ddy / dist
+                if (c.g.diet < 0.5 && o.g.diet > 0.5) {
+                  const threat = o.g.diet * o.energy * 0.5
+                  const urgency = 1.0 / (1.0 + dist * 0.15)
+                  const fleeStr = threat * urgency * (1 - c.g.diet) * sense
+                  fleeX -= nx * fleeStr
+                  fleeY -= ny * fleeStr
+                }
+                if (c.g.diet > 0.4 && o.energy < c.energy * 1.5) {
+                  const preyValue = (1 - o.g.diet) * o.energy * 0.3
+                  const proximity = 1.0 / (1.0 + dist * 0.1)
+                  const chaseStr = preyValue * proximity * c.g.diet * speed
+                  chaseX += nx * chaseStr
+                  chaseY += ny * chaseStr
+                }
+              }
+            }
+          }
+          c._fleeX = fleeX
+          c._fleeY = fleeY
+          c._chaseX = chaseX
+          c._chaseY = chaseY
         }
       }
 
-      // ── Predator-prey behavioral AI ──
-      // Only compute every few ticks for performance, cache the result
-      if ((i + this.t) % 3 === 0 && startCount > 5) {
-        let fleeX = 0,
-          fleeY = 0
-        let chaseX = 0,
-          chaseY = 0
-        const senseR = (sense * 2.5 + 4) * (1 + recBonus * 0.5)
-        const senseR2 = senseR * senseR
-        const scanRange = Math.min(40, Math.max(10, Math.floor(startCount * 0.02)))
-
-        for (let j = Math.max(0, i - scanRange); j < Math.min(startCount, i + scanRange); j++) {
-          if (j === i) continue
-          const o = this.cells[j]
-          if (o.clade === c.clade) continue
-          const ddx = torusDelta(o.x - c.x, this.w)
-          const ddy = torusDelta(o.y - c.y, this.h)
-          const d2 = ddx * ddx + ddy * ddy
-          if (d2 > senseR2 || d2 < 0.01) continue
-          const dist = Math.sqrt(d2)
-          const nx = ddx / dist,
-            ny = ddy / dist
-
-          // FLEE: if I'm herbivorous and they're carnivorous, run away
-          // Scientific basis: prey species detect predator chemical cues
-          // (kairomones) and flee — seen in zooplankton, fish, mammals
-          if (c.g.diet < 0.5 && o.g.diet > 0.5) {
-            const threat = o.g.diet * o.energy * 0.5 // how dangerous they are
-            const urgency = 1.0 / (1.0 + dist * 0.15) // closer = more urgent
-            const fleeStr = threat * urgency * (1 - c.g.diet) * sense
-            fleeX -= nx * fleeStr
-            fleeY -= ny * fleeStr
-          }
-
-          // CHASE: if I'm carnivorous and they're smaller/weaker, pursue
-          // Scientific basis: predators use visual/chemical tracking to
-          // actively pursue prey — wolves, sharks, amoeba phagocytosis
-          if (c.g.diet > 0.4 && o.energy < c.energy * 1.5) {
-            const preyValue = (1 - o.g.diet) * o.energy * 0.3 // prefer herbivores
-            const proximity = 1.0 / (1.0 + dist * 0.1)
-            const chaseStr = preyValue * proximity * c.g.diet * speed
-            chaseX += nx * chaseStr
-            chaseY += ny * chaseStr
-          }
-        }
-
-        c._fleeX = fleeX
-        c._fleeY = fleeY
-        c._chaseX = chaseX
-        c._chaseY = chaseY
+      // ── Epigenetic mark updates (every 32 ticks for perf) ──
+      if (c.age % 32 === 0) {
+        const epi =
+          c.g.epiMarks ||
+          (c.g.epiMarks = {
+            stressResponse: 0,
+            abundanceMemory: 0,
+            socialPriming: 0,
+            predatorMemory: 0,
+            darkAdapt: 0
+          })
+        const decay = 0.97 // slow decay per update (~2% per 16 ticks)
+        // Starvation → stress response mark (doubled rates since we run half as often)
+        if (c.energy < 1.0) epi.stressResponse = Math.min(1, epi.stressResponse + 0.08)
+        else epi.stressResponse *= decay * decay
+        // Abundance → abundance memory mark
+        if (c.energy > 3.0) epi.abundanceMemory = Math.min(1, epi.abundanceMemory + 0.06)
+        else epi.abundanceMemory *= decay * decay
+        // Nearby kin → social priming mark
+        if (c.organismSize > 1 || (c._cachedDensity || 0) > 4)
+          epi.socialPriming = Math.min(1, epi.socialPriming + 0.06)
+        else epi.socialPriming *= decay * decay
+        // Predator encounters → predator memory mark
+        const hadPredator = (c._fleeX || 0) * (c._fleeX || 0) + (c._fleeY || 0) * (c._fleeY || 0) > 0.01
+        if (hadPredator) epi.predatorMemory = Math.min(1, epi.predatorMemory + 0.1)
+        else epi.predatorMemory *= decay * decay
+        // Low light → dark adaptation mark (inlined sunlight sampling)
+        const _snx = (c.x - _wcx) * _invHalfW
+        const _sny = (c.y - _wcy) * _invHalfH
+        const sunHere = (0.5 + (_snx * _sunCos + _sny * _sunSin) * 0.5) * _sunIntensity
+        if (sunHere < 0.4) epi.darkAdapt = Math.min(1, epi.darkAdapt + 0.06)
+        else epi.darkAdapt *= decay * decay
       }
 
-      // Apply cached flee/chase vectors
-      const fleeScale = 0.6 * (1 - c.g.diet) // herbivores flee more
-      const chaseScale = 0.5 * c.g.diet // carnivores chase more
+      // ── Behavioral gene effects on movement ──
+      const epi = c.g.epiMarks || {}
+
+      // Fear gene + predator memory epigenetic mark → amplified flee response
+      const fearMod = (c.g.fear || 0.3) + (epi.predatorMemory || 0) * 0.3
+      // Aggression gene → amplified chase response
+      const aggrMod = (c.g.aggression || 0.1) + (epi.stressResponse || 0) * 0.15
+      // Curiosity gene → random exploration impulse (explore new areas)
+      const curiosityMod = (c.g.curiosity || 0.3) + (epi.abundanceMemory || 0) * 0.1
+
+      // Apply cached flee/chase vectors with behavioral modulation
+      const fleeScale = 0.6 * (1 - c.g.diet) * (0.5 + fearMod) // fear amplifies fleeing
+      const chaseScale = 0.5 * c.g.diet * (0.5 + aggrMod) // aggression amplifies chasing
       wx += (c._fleeX || 0) * fleeScale
       wy += (c._fleeY || 0) * fleeScale
       wx += (c._chaseX || 0) * chaseScale
       wy += (c._chaseY || 0) * chaseScale
+
+      // Curiosity: random exploration bursts — curious cells occasionally veer off
+      if (curiosityMod > 0.2 && c.age % 32 < 4) {
+        wx += randNorm(this.rng) * curiosityMod * 0.4
+        wy += randNorm(this.rng) * curiosityMod * 0.4
+      }
+
+      // Territorial: cells with high territorial gene resist moving far from birthplace
+      // They develop a "home range" preference (cached as _homeX/_homeY on first set)
+      const terr = c.g.territorial || 0
+      if (terr > 0.15) {
+        if (c._homeX === undefined) {
+          c._homeX = c.x
+          c._homeY = c.y
+        }
+        const hdx = torusDelta(c._homeX - c.x, _w)
+        const hdy = torusDelta(c._homeY - c.y, _h)
+        const homeDist = Math.sqrt(hdx * hdx + hdy * hdy) || 0.001
+        if (homeDist > 15) {
+          wx += (hdx / homeDist) * terr * 0.3
+          wy += (hdy / homeDist) * terr * 0.3
+        }
+      }
+
+      // Migratory: long-range directional drift using LUT (no per-cell trig)
+      const migr = c.g.migratory || 0
+      if (migr > 0.1) {
+        const migrAngle = (c.id * 1.7 + _tick * 0.0003 * (1 + migr)) % 6.2832
+        const _lutIdx = (((migrAngle * _migrN) / 6.2832) | 0) & (_migrN - 1)
+        wx += _migrCos[_lutIdx] * migr * 0.25
+        wy += _migrSin[_lutIdx] * migr * 0.25
+      }
+
+      // ── Alarm pheromone response ──
+      // Cells detect chemical alarm signals from killed conspecifics and flee.
+      // Response strength: fear gene × alarm concentration × diet filter
+      // Pure carnivores (diet > 0.7) ignore alarm — they're the predators.
+      // Scientific basis: Schreckstoff in Ostariophysi, alarm pheromones in ants,
+      // panic schooling in fish, mobbing calls in birds.
+      if (fearMod > 0.1 && c.g.diet < 0.7 && (i + _tick) % _alarmStride === 0) {
+        const alarmHere = this.sampleAlarm(c.x, c.y)
+        if (alarmHere > 0.05) {
+          // Sample alarm gradient to determine flee direction
+          const aL = this.sampleAlarm(c.x - 4, c.y)
+          const aR = this.sampleAlarm(c.x + 4, c.y)
+          const aU = this.sampleAlarm(c.x, c.y - 4)
+          const aD = this.sampleAlarm(c.x, c.y + 4)
+          // Flee direction = away from highest alarm concentration (negative gradient)
+          let adx = aL - aR
+          let ady = aU - aD
+          const aMag = Math.sqrt(adx * adx + ady * ady) || 0.001
+          adx /= aMag
+          ady /= aMag
+          // Flee strength: fear × alarm intensity, capped
+          const fleeStr = Math.min(1.5, fearMod * alarmHere * 0.8)
+          wx += adx * fleeStr
+          wy += ady * fleeStr
+          // Epigenetic: mark predator memory so fear persists after alarm fades
+          if (!c.g.epiMarks) c.g.epiMarks = {}
+          c.g.epiMarks.predatorMemory = Math.min(1, (c.g.epiMarks.predatorMemory || 0) + alarmHere * 0.1)
+        }
+      }
+
+      // Nocturnal: cells with high nocturnal gene are more active in low light
+      const noct = (c.g.nocturnal || 0) + (epi.darkAdapt || 0) * 0.2
+      if (noct > 0.15) {
+        // Inlined sunlight sampling
+        const _snx2 = (c.x - _wcx) * _invHalfW
+        const _sny2 = (c.y - _wcy) * _invHalfH
+        const sunHere2 = (0.5 + (_snx2 * _sunCos + _sny2 * _sunSin) * 0.5) * _sunIntensity
+        // In darkness: speed boost. In light: sluggish
+        const noctMod = sunHere2 < 0.5 ? 1.0 + noct * 0.4 : 1.0 - noct * 0.15
+        wx *= noctMod
+        wy *= noctMod
+      }
 
       // ── Phototropism: move toward sunlight ──
       // Herbivores with high phototropism gene chase the lit side of the world
       const photoGene = c.g.phototropism || 0
       if (photoGene > 0.05) {
         const photoStr = photoGene * (1 - c.g.diet) * 0.4 // only herbivores benefit
-        const sunDx = Math.cos(this.sunAngle)
-        const sunDy = Math.sin(this.sunAngle)
-        wx += sunDx * photoStr
-        wy += sunDy * photoStr
+        wx += _sunCos * photoStr
+        wy += _sunSin * photoStr
       }
 
+      // Reuse cached _vLen for all directional thrust computations
+      const _nvx = _cvx / _vLen,
+        _nvy = _cvy / _vLen
       if (c.g.flagella > 0.05) {
-        const vLen = Math.sqrt(c.vx * c.vx + c.vy * c.vy) || 0.001
-        wx += (c.vx / vLen) * flagellaBoost
-        wy += (c.vy / vLen) * flagellaBoost
+        wx += _nvx * flagellaBoost
+        wy += _nvy * flagellaBoost
       }
       if (c.g.flipper > 0.1) {
-        const vLen = Math.sqrt(c.vx * c.vx + c.vy * c.vy) || 0.001
-        wx += (c.vx / vLen) * flipperBoost
-        wy += (c.vy / vLen) * flipperBoost
+        wx += _nvx * flipperBoost
+        wy += _nvy * flipperBoost
       }
       // Elongation: strong forward thrust along current heading, resists turning
       if ((c.g.elongation || 0) > 0.1) {
         const el = c.g.elongation
-        const vLen = Math.sqrt(c.vx * c.vx + c.vy * c.vy) || 0.001
-        wx += (c.vx / vLen) * el * 1.2
-        wy += (c.vy / vLen) * el * 1.2
+        wx += _nvx * el * 1.2
+        wy += _nvy * el * 1.2
       }
       // Paddle fins: broad directional thrust with slight lateral stability
       if ((c.g.paddleFin || 0) > 0.1) {
-        const vLen = Math.sqrt(c.vx * c.vx + c.vy * c.vy) || 0.001
-        wx += (c.vx / vLen) * paddleFinBoost
-        wy += (c.vy / vLen) * paddleFinBoost
+        wx += _nvx * paddleFinBoost
+        wy += _nvy * paddleFinBoost
       }
       if (c.g.amoeboid > 0.05) {
         wx += randNorm(this.rng) * amoeboidBoost
@@ -550,9 +1086,9 @@ export function installStep(Sim, getWasmReady) {
       }
       if (c.g.jet > 0.1 && c.jetCooldown === 0 && c.energy > 0.8) {
         const jetPower = c.g.jet * 2.5
-        const vLen = Math.sqrt(wx * wx + wy * wy) || 0.001
-        c.vx += (wx / vLen) * jetPower
-        c.vy += (wy / vLen) * jetPower
+        const _wLen = Math.sqrt(wx * wx + wy * wy) || 0.001
+        c.vx += (wx / _wLen) * jetPower
+        c.vy += (wy / _wLen) * jetPower
         c.energy -= c.g.jet * 0.15
         c.jetCooldown = Math.max(8, 30 - c.g.jet * 20) | 0
       }
@@ -560,18 +1096,27 @@ export function installStep(Sim, getWasmReady) {
       c.vx += wx * moveAmt * cilFactor * roleSpeedMod
       c.vy += wy * moveAmt * cilFactor * roleSpeedMod
 
-      const v = Math.sqrt(c.vx * c.vx + c.vy * c.vy) || 0.0001
+      // Velocity clamping — use squared comparison to skip sqrt for most cells
       const mechSpeedBonus = c.g.flagella * 0.3 + c.g.jet * 0.5
-      // Elongation: streamlined body = higher top speed (like a fish vs a sphere)
       const elongSpeedBonus = (c.g.elongation || 0) * 0.4
       const vmax = (0.55 + 0.65 * speed + mechSpeedBonus + elongSpeedBonus) * roleSpeedMod
-      if (v > vmax) {
-        c.vx = (c.vx / v) * vmax
-        c.vy = (c.vy / v) * vmax
+      const _v2 = c.vx * c.vx + c.vy * c.vy
+      const _vmax2 = vmax * vmax
+      if (_v2 > _vmax2) {
+        const _vScale = vmax / Math.sqrt(_v2)
+        c.vx *= _vScale
+        c.vy *= _vScale
       }
 
       if (c.eatFlash > 0) c.eatFlash--
       if (c.engulfing > 0) c.engulfing--
+
+      // ── Sub-timing: end movement, start feeding ──
+      if ((i & (_CL_SAMPLE - 1)) === 0) {
+        const _t = performance.now()
+        _cl_moveT += _t - _cl_t0
+        _cl_t0 = _t
+      }
 
       const prevEnergy = c.energy
 
@@ -582,16 +1127,22 @@ export function installStep(Sim, getWasmReady) {
       // the same food patch means each gets a smaller share
       const cachedDens = c._cachedDensity || 5
       const competitionPenalty = cachedDens > 6 ? Math.max(0.5, 1.0 - (cachedDens - 6) * 0.02) : 1.0
+      // A/B split world: side B gets food uptake multiplier
+      const splitFood =
+        _splitWorld && _splitWorld.active && _splitWorld.getSide(c, this) === 'B'
+          ? _splitWorld.sideB.foodGrowthMult || 1.0
+          : 1.0
       const uptakeBase =
-        this.cfg.uptake *
+        _uptake *
         (0.75 + 0.35 * sense) *
         (1 + recBonus * 0.5) *
         depthPenalty *
         orgFeedBonus *
-        competitionPenalty
+        competitionPenalty *
+        splitFood
 
       // Bioluminescence: pull nearby food toward this cell
-      if ((c.g.biolum || 0) > 0.1 && this.t % 8 === 0) {
+      if ((c.g.biolum || 0) > 0.1 && _tick % 8 === 0) {
         const bl = c.g.biolum
         const pullR = 3 + bl * 4
         const pullStr = bl * 0.12
@@ -603,9 +1154,8 @@ export function installStep(Sim, getWasmReady) {
       let feedX = c.x,
         feedY = c.y
       if (probRange > 0) {
-        const pVLen = Math.sqrt(c.vx * c.vx + c.vy * c.vy) || 0.001
-        feedX = c.x + (c.vx / pVLen) * probRange
-        feedY = c.y + (c.vy / pVLen) * probRange
+        feedX = c.x + _nvx * probRange
+        feedY = c.y + _nvy * probRange
       }
       // Amoeboid: pseudopods extend surface area for absorption — sample food in a ring
       const amoeboidUptakeBonus = (c.g.amoeboid || 0) > 0.15 ? 1.0 + c.g.amoeboid * 0.8 : 1.0
@@ -613,14 +1163,24 @@ export function installStep(Sim, getWasmReady) {
       // Scientific basis: stalked ciliates (Vorticella), barnacles, sea lilies —
       // sessile organisms compensate for immobility with enhanced local resource extraction
       const stalkUptakeBonus = (c.g.stalk || 0) > 0.1 ? 1.0 + (c.g.stalk || 0) * 0.5 : 1.0
-      // Sample sunlight at cell position (used by chloroplast photosynthesis later)
-      const localSunlight = this._sampleSunlight(c.x, c.y)
+      // Inlined sunlight sampling (avoid function call overhead per cell)
+      const _snx3 = (c.x - _wcx) * _invHalfW
+      const _sny3 = (c.y - _wcy) * _invHalfH
+      const localSunlight = (0.5 + (_snx3 * _sunCos + _sny3 * _sunSin) * 0.5) * _sunIntensity
+      // Large herbivores graze more efficiently: bigger mouth/filtering apparatus
+      // Scientific basis: baleen whales, elephants, manatees — body size enables
+      // bulk feeding strategies unavailable to small organisms
+      const herbGrazeScale = c.g.diet < 0.4 ? 1.0 + Math.max(0, (c.g.bodyScale || 1.0) - 0.9) * 0.5 : 1.0
       const plantTake = this._takeFood(
         feedX,
         feedY,
-        uptakeBase * herbivoreAff * amoeboidUptakeBonus * stalkUptakeBonus
+        uptakeBase * herbivoreAff * amoeboidUptakeBonus * stalkUptakeBonus * herbGrazeScale
       )
-      c.energy += plantTake
+      // Herbivore digestion bonus: specialized enzymes extract more energy from plants
+      // (cellulase, fermentation — cows get 70% more energy from grass than a carnivore would)
+      const herbDigestionBonus =
+        c.g.diet < 0.3 ? 1.0 + (0.3 - c.g.diet) * 1.2 : c.g.diet < 0.5 ? 1.0 + (0.5 - c.g.diet) * 0.3 : 1.0
+      c.energy += plantTake * herbDigestionBonus
       if (plantTake > 0.02) {
         c.lastAte = FOOD_PLANT
         c.eatFlash = 15
@@ -653,7 +1213,7 @@ export function installStep(Sim, getWasmReady) {
       }
 
       // Cilia: sweep feeding — hair-like projections create currents that pull food from multiple directions
-      if (c.g.cilia > 0.15 && (i + this.t) % 4 === 0) {
+      if (c.g.cilia > 0.15 && (i + _tick) % 4 === 0) {
         const ciliaRange = 1.5 + ciliaBoost * 4
         const sweepPoints = Math.min(4, 2 + Math.floor(c.g.cilia * 3))
         let ciliaTotal = 0
@@ -671,11 +1231,11 @@ export function installStep(Sim, getWasmReady) {
       // Symbiosis: redistribute energy among nearby kin (mutualistic sharing)
       // Scientific basis: mycorrhizal networks in forests, coral-zooxanthellae,
       // slime mold nutrient sharing — cooperative resource pooling
-      if ((c.g.symbiosis || 0) > 0.15 && (i + this.t) % 6 === 0) {
+      if ((c.g.symbiosis || 0) > 0.15 && (i + _tick) % _symbStride === 0) {
         const sym = c.g.symbiosis
         const shareR = 5 + sym * 8
         const shareR2 = shareR * shareR
-        const scanW = Math.min(20, Math.max(5, Math.floor(startCount * 0.01)))
+        const scanW = Math.min(15, Math.max(5, Math.floor(startCount * 0.008)))
         for (let j = Math.max(0, i - scanW); j < Math.min(startCount, i + scanW); j++) {
           if (j === i) continue
           const o = this.cells[j]
@@ -693,6 +1253,25 @@ export function installStep(Sim, getWasmReady) {
         }
       }
 
+      // Biome symbiosis bonus: organisms with symbiosis gene thrive in symbiosis-rich biomes
+      // Scientific basis: coral-zooxanthellae mutualism, vent tube worm-bacteria symbiosis
+      if ((c.g.symbiosis || 0) > 0.1 && (i + _tick) % 8 === 0) {
+        const _bCfg = this.getBiomeConfigAt(c.x, c.y)
+        if (_bCfg && _bCfg.symbiosis > 0) {
+          c.energy += c.g.symbiosis * _bCfg.symbiosis * 0.003
+        }
+      }
+
+      // Shelter-seeking: organisms near shelter get reduced metabolism (less stress)
+      // Scientific basis: reef organisms expend less energy on predator vigilance
+      if ((i + _tick) % 12 === 0) {
+        const _localShelter = this.sampleShelter(c.x, c.y)
+        if (_localShelter > 0.2) {
+          // Small energy bonus from shelter — reduced stress
+          c.energy += Math.min(_localShelter, 2.0) * 0.0005
+        }
+      }
+
       // Amoeboid: pseudopods also absorb minerals better (engulfing particles)
       if ((c.g.amoeboid || 0) > 0.15) {
         const amoebMineralBonus = this._takeMineral(c.x, c.y, uptakeBase * c.g.amoeboid * 0.3)
@@ -700,7 +1279,7 @@ export function installStep(Sim, getWasmReady) {
       }
 
       // Proboscis: parasitic energy drain — siphon energy from nearby non-kin cells
-      if ((c.g.proboscis || 0) > 0.2 && c.g.diet > 0.3 && this.t % 8 === 0) {
+      if ((c.g.proboscis || 0) > 0.2 && c.g.diet > 0.3 && _tick % 8 === 0) {
         const probR = 3 + c.g.proboscis * 5
         const probR2 = probR * probR
         for (let j = Math.max(0, i - 20); j < Math.min(startCount, i + 20); j++) {
@@ -718,69 +1297,195 @@ export function installStep(Sim, getWasmReady) {
         }
       }
 
+      // ── Sub-timing: end feeding, start metabolism ──
+      if ((i & (_CL_SAMPLE - 1)) === 0) {
+        const _t = performance.now()
+        _cl_feedT += _t - _cl_t0
+        _cl_t0 = _t
+      }
+
       // ── Density-dependent metabolism (logistic growth / Verhulst) ──
       // Crowded cells pay more energy — this creates natural carrying capacity.
       // Scientific basis: intraspecific competition for resources increases
       // metabolic stress when population density is high locally.
-      const localDens = (i + this.t) % 4 === 0 ? this._localDensity(c, spatial) : c._cachedDensity || 5
+      const localDens =
+        (i + _tick) % _densStride === 0 ? this._localDensity(c, spatial) : c._cachedDensity || 5
       c._cachedDensity = localDens
       // crowdingStress: 1.0 at low density, up to ~1.6 at very high density
       const crowdingStress = 1.0 + Math.max(0, localDens - 8) * 0.025
       // Organisms buffer crowding via cooperation (division of labor)
       const orgCrowdBuffer = c.organismSize > 1 ? Math.max(0.7, 1.0 - c.organismSize * 0.03) : 1.0
 
-      // Multicellular metabolic efficiency
-      const orgMetabBonus =
-        c.organismSize > 1 ? Math.max(0.6, 1.0 - Math.min(c.organismSize, 10) * 0.04) : 1.0
+      // Multicellular metabolic efficiency (Kleiber's law / allometric scaling)
+      // Small multicellular organisms gain efficiency (division of labor),
+      // but very large ones pay coordination/transport overhead.
+      // Optimal size ~4-12 cells; beyond that, costs rise.
+      let orgMetabBonus = 1.0
+      if (c.organismSize > 1) {
+        const effSize = Math.min(c.organismSize, 8)
+        const bonus = 1.0 - effSize * 0.04 // efficiency gain up to size 8
+        const overhead = c.organismSize > 12 ? (c.organismSize - 12) * 0.02 : 0 // coordination cost
+        orgMetabBonus = Math.max(0.7, bonus) + overhead
+      }
       // Solitary penalty: as environment gets harsher, unlinked cells pay more
       const solitaryPenalty = c.linkCount === 0 ? envHarshness : Math.max(1.0, envHarshness * 0.7)
       // PaddleFin: energy-efficient locomotion at speed
       const paddleEfficiency = (c.g.paddleFin || 0) > 0.15 ? 1.0 - c.g.paddleFin * 0.25 : 1.0
       // Carnivore metabolic discount: predators have efficient resting metabolism
       // (feast-famine adaptation — cats, snakes, crocodiles all have low BMR)
-      const carnivoreMetab = c.g.diet > 0.5 ? Math.max(0.55, 1.0 - c.g.diet * 0.45) : 1.0
-      // Biome-specific metabolism multiplier
+      const carnivoreMetab = c.g.diet > 0.5 ? Math.max(0.7, 1.0 - c.g.diet * 0.3) : 1.0
+      // Herbivore metabolic efficiency: specialized gut flora, fermentation chambers
+      // (ruminants, termites, koalas — extract more energy per unit plant matter)
+      // Also rewards larger herbivores: bigger gut = more efficient digestion (Kleiber's law)
+      const herbScale = c.g.bodyScale || 1.0
+      const herbSizeBonus = herbScale > 1.0 ? 1.0 + (herbScale - 1.0) * 0.15 : 1.0
+      const herbivoreMetab =
+        c.g.diet < 0.3 ? Math.max(0.7, 1.0 - (0.3 - c.g.diet) * 0.6) * (1.0 / herbSizeBonus) : 1.0
+      // Biome-specific metabolism multiplier (uses hoisted biome array)
       let biomeMetab = 1.0
-      const _biomes = this.cfg.biomes
-      if (_biomes && _biomes.length > 0) {
-        const _regionW = this.w / _biomes.length
-        const _bi = Math.min(_biomes.length - 1, (c.x / _regionW) | 0)
+      if (_numBiomes > 0) {
+        const _bi = Math.min(_numBiomes - 1, (c.x / _biomeRegionW) | 0)
         biomeMetab = _biomes[_bi].metabolismMult || 1.0
       }
+      // Epigenetic stress response: elevated metabolism (cortisol/adrenaline analog)
+      const epiStressMetab = 1.0 + ((c.g.epiMarks || {}).stressResponse || 0) * 0.15
+      // A/B split world: side B gets metabolism multiplier
+      const splitMetab =
+        _splitWorld && _splitWorld.active && _splitWorld.getSide(c, this) === 'B'
+          ? _splitWorld.sideB.metabolismMult || 1.0
+          : 1.0
       c.energy -=
-        this.cfg.metabolismBase *
+        _metabolismBase *
         metabolism *
         (1 + 0.7 * speed * paddleEfficiency) *
-        this.cfg.dt *
+        _dt *
         orgMetabBonus *
         solitaryPenalty *
         crowdingStress *
         orgCrowdBuffer *
         carnivoreMetab *
-        biomeMetab
-      c.energy -= spinesCost
-      c.energy -= c.g.flipper * 0.001
-      c.energy -= c.g.cilia * 0.0008
-      c.energy -= c.g.flagella * 0.0012
-      c.energy -= c.g.jet * 0.002
-      c.energy -= c.g.amoeboid * 0.0003
-      c.energy -= c.g.toxin * 0.0015
-      c.energy -= c.g.spike * 0.001
-      c.energy -= c.g.constrict * 0.0008
-      c.energy -= camoEnergyCost
-      c.energy -= (c.g.toxinResist || 0) * 0.0005
-      c.energy -= (c.g.elongation || 0) * 0.0004
-      c.energy -= (c.g.biolum || 0) * 0.0018
-      c.energy -= (c.g.vesicles || 0) * 0.001
-      c.energy -= Math.max(0, (c.g.bodyScale || 1) - 1) * 0.0008
-      c.energy -= (c.g.brightness || 0) * 0.0006
-      c.energy -= (c.g.proboscis || 0) * 0.0005
-      c.energy -= (c.g.paddleFin || 0) * 0.0008
-      c.energy -= (c.g.scavenger || 0) * 0.0006
-      c.energy -= (c.g.shell || 0) * 0.0015
-      c.energy -= (c.g.symbiosis || 0) * 0.0008
-      c.energy -= (c.g.eyespot || 0) * 0.0006
-      c.energy -= (c.g.stalk || 0) * 0.0004
+        herbivoreMetab *
+        biomeMetab *
+        epiStressMetab *
+        splitMetab
+      // Batched trait maintenance costs (single property write instead of 33)
+      {
+        const _g = c.g
+        c.energy -=
+          spinesCost +
+          camoEnergyCost +
+          _g.flipper * 0.001 +
+          _g.cilia * 0.0008 +
+          _g.flagella * 0.0012 +
+          _g.jet * 0.002 +
+          _g.amoeboid * 0.0003 +
+          _g.toxin * 0.0015 +
+          _g.spike * 0.001 +
+          _g.constrict * 0.0008 +
+          (_g.toxinResist || 0) * 0.0005 +
+          (_g.elongation || 0) * 0.0004 +
+          (_g.biolum || 0) * 0.0018 +
+          (_g.vesicles || 0) * 0.001 +
+          Math.max(0, (_g.bodyScale || 1) - 1) * 0.0004 +
+          (_g.brightness || 0) * 0.0006 +
+          (_g.proboscis || 0) * 0.0005 +
+          (_g.paddleFin || 0) * 0.0008 +
+          (_g.scavenger || 0) * 0.0006 +
+          (_g.shell || 0) * 0.0015 +
+          (_g.symbiosis || 0) * 0.0008 +
+          (_g.eyespot || 0) * 0.0006 +
+          (_g.stalk || 0) * 0.0004 +
+          // Behavioral gene maintenance costs (neural signaling networks)
+          (_g.curiosity || 0) * 0.0003 +
+          (_g.aggression || 0) * 0.0004 +
+          (_g.fear || 0) * 0.0002 +
+          (_g.territorial || 0) * 0.0003 +
+          (_g.nocturnal || 0) * 0.0002 +
+          (_g.migratory || 0) * 0.0003 +
+          (_g.nurturing || 0) * 0.0002 +
+          (_g.respiration || 0) * 0.0003 +
+          (_g.wasteExpel || 0) * 0.0002
+      }
+
+      // ── Gas exchange & aerobic respiration ──
+      if (c.age % _gasTickStride === 0) {
+        const gx = Math.min(_gasWm1, ((c.x / _w) * _gasW) | 0)
+        const gy = Math.min(_gasHm1, ((c.y / _h) * _gasH) | 0)
+        const gi = gx + gy * _gasW
+        const resp = c.g.respiration || 0.4
+        const localO2 = _o2Grid[gi]
+
+        // O2 intake: cell absorbs O2 from environment based on respiration gene
+        // Scientific basis: gill/membrane surface area determines gas exchange rate.
+        // Mitochondria level boosts O2 utilization (more powerhouses = more demand).
+        const mitoBoost = 1.0 + c.organelles[ORGANELLE_MITOCHONDRIA] * 0.5
+        const o2Intake = Math.min(localO2 * 0.15, resp * 0.08 * mitoBoost) * 4
+        c.o2Store = Math.min(1.0, (c.o2Store || 0) + o2Intake)
+        _o2Grid[gi] = Math.max(0, localO2 - o2Intake)
+
+        // Aerobic energy production: O2 + metabolized food → ATP (energy) + CO2 + waste
+        // This is the Krebs cycle / oxidative phosphorylation analog.
+        // Without O2, cells can only use anaerobic metabolism (much less efficient).
+        const o2Available = c.o2Store || 0
+        const aerobicRate = Math.min(o2Available, metabolism * 0.04) * 4
+        if (aerobicRate > 0.001) {
+          // Aerobic bonus: extra energy from efficient O2-based metabolism
+          c.energy += aerobicRate * 0.15
+          c.o2Store -= aerobicRate
+          // CO2 output: byproduct of respiration
+          _co2Grid[gi] = Math.min(2.0, _co2Grid[gi] + aerobicRate * 0.8)
+          // Waste production: metabolic byproducts (urea, ammonia, lactate analogs)
+          c.waste = (c.waste || 0) + aerobicRate * 0.12
+        }
+
+        // Anaerobic waste: even without O2, baseline metabolism produces waste
+        c.waste = (c.waste || 0) + metabolism * 0.004
+
+        // Waste expulsion: cells actively pump out waste
+        const expelRate = (c.g.wasteExpel || 0.3) * 0.06 * 4
+        c.waste = Math.max(0, c.waste - expelRate)
+
+        // Chloroplast photosynthesis: consume CO2, produce O2
+        // Scientific basis: 6CO2 + 6H2O → C6H12O6 + 6O2
+        const chloro = c.g.chloroplast || 0
+        if (chloro > 0.05) {
+          const localCO2 = _co2Grid[gi]
+          const photoRate = chloro * localSunlight * 0.06 * 4
+          const co2Used = Math.min(localCO2 * 0.2, photoRate)
+          _co2Grid[gi] = Math.max(0, localCO2 - co2Used)
+          _o2Grid[gi] = Math.min(2.0, _o2Grid[gi] + co2Used * 0.9)
+        }
+      }
+
+      // Waste toxicity: high waste levels poison the cell
+      // Scientific basis: uremia, acidosis — metabolic waste buildup damages cells
+      const wasteLevel = c.waste || 0
+      if (wasteLevel > 0.5) {
+        const wastePenalty = (wasteLevel - 0.5) * 0.004
+        c.energy -= wastePenalty
+        // Waste accelerates senescence (cellular damage from toxins)
+        c.senescence = (c.senescence || 0) + (wasteLevel - 0.5) * 0.00005
+      }
+
+      // ── Muller's ratchet + genome architecture + irreducible complexity costs ──
+      // Batched into single subtraction for fewer property writes
+      {
+        const _g = c.g
+        let _genomeCost =
+          effectiveDriftLoad * 0.006 +
+          Math.max(0, (_g.genomeSize || 1) - 1) * 0.0008 +
+          Math.max(0, (_g.ploidy || 1) - 1) * 0.0006 +
+          (_g.regulatoryComplexity || 0) * 0.0005 +
+          (_g.dnaRepair || 0) * 0.0008 +
+          (_g.immuneStrength || 0) * 0.0006 +
+          (_g.signaling || 0) * 0.0004 +
+          (_g.plasticity || 0) * 0.0003
+        // Irreducible complexity barriers (Behe / Axe): fitness valleys
+        if (_g.jet > 0.05 && _g.jet < 0.25) _genomeCost += _g.jet * 0.003
+        if (_g.constrict > 0.03 && _g.constrict < 0.15) _genomeCost += _g.constrict * 0.004
+        if (_g.toxin > 0.03 && _g.toxin < 0.15) _genomeCost += _g.toxin * 0.003
+        c.energy -= _genomeCost
+      }
 
       // ── Photosynthesis: chloroplast gene converts sunlight → energy ──
       // This is the PRIMARY energy source for the ecosystem.
@@ -829,23 +1534,23 @@ export function installStep(Sim, getWasmReady) {
         c.foragingEff * 3.0 + c.explorationScore * 0.5 + c.cooperationScore * 2.5 + survivalBonus + multiBonus
 
       // Use nearest gradient peak for fitness distance
-      let bestFitDist = Infinity
-      const gPeaks = this.gradientPeaks || [this.gradientPeak]
-      for (let gpi = 0; gpi < gPeaks.length; gpi++) {
-        const gdx = torusDelta(c.x - gPeaks[gpi].x, this.w)
-        const gdy = torusDelta(c.y - gPeaks[gpi].y, this.h)
-        const gd = Math.sqrt(gdx * gdx + gdy * gdy)
-        if (gd < bestFitDist) bestFitDist = gd
+      let bestFitD2 = Infinity
+      for (let gpi = 0; gpi < _nGPeaks; gpi++) {
+        const gdx = torusDelta(c.x - _gPeaks[gpi].x, _w)
+        const gdy = torusDelta(c.y - _gPeaks[gpi].y, _h)
+        const gd2 = gdx * gdx + gdy * gdy
+        if (gd2 < bestFitD2) bestFitD2 = gd2
       }
+      const bestFitDist = Math.sqrt(bestFitD2)
       c.fitnessDist = bestFitDist
-      c.fitnessAccum += 1.0 / (1.0 + c.fitnessDist * 0.02)
+      c.fitnessAccum += 1.0 / (1.0 + bestFitDist * 0.02)
 
       if (!isFinite(c.vx)) c.vx = 0
       if (!isFinite(c.vy)) c.vy = 0
-      c.x = (((c.x + c.vx) % this.w) + this.w) % this.w
-      c.y = (((c.y + c.vy) % this.h) + this.h) % this.h
-      if (!isFinite(c.x)) c.x = this.w * 0.5
-      if (!isFinite(c.y)) c.y = this.h * 0.5
+      c.x = (((c.x + c.vx) % _w) + _w) % _w
+      c.y = (((c.y + c.vy) % _h) + _h) % _h
+      if (!isFinite(c.x)) c.x = _halfW
+      if (!isFinite(c.y)) c.y = _halfH
       c.vx *= 0.985
       c.vy *= 0.985
       this._enforceBlobBoundary(c)
@@ -859,61 +1564,132 @@ export function installStep(Sim, getWasmReady) {
         c.age > 400 &&
         this.rng() < c.g.apoptosis * 0.003
       ) {
-        this._dropMeat(c.x, c.y, c.energy * this.cfg.meatDropEnergy)
+        this._dropMeat(c.x, c.y, c.energy * _meatDropEnergy)
         c.energy = -1
       }
 
-      // ── Natural aging death for solitary (single-cell) organisms ──
-      // Scientific basis: Hayflick limit — cells have finite replicative lifespan.
-      // Multicellular organisms buffer aging via cell replacement and cooperation.
-      // Solitary cells accumulate damage and eventually senesce.
-      // Lifespan is determined by many factors:
-      //   longevity gene, membrane integrity, toughness, body scale,
-      //   energy reserves, complexity, and metabolic rate.
-      // Natural deaths drop generous carrion, creating a scavenger niche.
-      if (c.organismSize <= 1 && c.age > 800) {
-        const longevityGene = c.g.longevity || 0.5
-        // Base lifespan: 2000-8000 ticks depending on longevity gene
-        const baseLifespan = 2000 + longevityGene * 6000
-        // Modifiers that extend lifespan
-        const membraneBonus = 1.0 + (c.g.membrane || 0) * 0.4 // tough membrane protects
-        const toughnessBonus = 1.0 + (c.g.toughness || 0) * 0.3 // structural integrity
-        const bodyScaleBonus = 1.0 + Math.max(0, (c.g.bodyScale || 1) - 0.8) * 0.2 // larger = longer-lived
-        const complexityBonus = 1.0 + (c.complexity || 0) * 0.05 // more complex = better repair
-        // Modifiers that shorten lifespan
-        const speedPenalty = 1.0 / (1.0 + (c.g.speed || 1) * 0.1) // fast metabolism = shorter life
-        const toxinPenalty = 1.0 / (1.0 + (c.g.toxin || 0) * 0.3) // toxin production is costly
-        // Energy reserves extend life (well-fed organisms live longer)
-        const energyBonus = 1.0 + Math.min(1.0, c.energy * 0.15)
-
-        const maxAge =
-          baseLifespan *
-          membraneBonus *
-          toughnessBonus *
-          bodyScaleBonus *
-          complexityBonus *
-          speedPenalty *
-          toxinPenalty *
-          energyBonus
-
-        if (c.age > maxAge) {
-          // Senescence: increasing probability of death as age exceeds lifespan
-          const overAge = (c.age - maxAge) / (maxAge * 0.3) // 0..1 over 30% of lifespan
-          const deathProb = Math.min(0.15, overAge * overAge * 0.05)
-          if (this.rng() < deathProb) {
-            // Natural death — drop generous carrion (more than predation kills)
-            // This creates the ecological niche for scavengers
-            const carrionAmount = c.energy * 0.8 + 0.5 // generous drop
-            this._dropMeat(c.x, c.y, carrionAmount)
-            c._deathCause = 'senescence'
-            c.energy = -1 // mark for death
+      // ── Emergent multicellular life cycles (Staps/Tarnita 2019) ──
+      // Scientific basis: In the Staps et al. model, cells evolve to periodically
+      // switch off their stickiness gene, causing complete group disintegration
+      // into single-cell propagules that seed new groups. This creates a life
+      // cycle: grow → fragment → disperse → re-aggregate. The fragmentation gene
+      // controls the propensity for this behavior; propaguleSize (Gao/Traulsen 2022)
+      // controls whether offspring are single cells or multi-cell clusters.
+      const frag = c.g.fragmentation || 0
+      if (frag > 0.15 && c.organismSize >= 3 && c.linkCount > 0 && c.age > 300) {
+        // Fragmentation probability increases with organism size and age
+        // Larger organisms fragment more readily (growth costs exceed benefits)
+        const sizePress = Math.min(1, (c.organismSize - 3) / 8)
+        const agePress = Math.min(1, (c.age - 300) / 2000)
+        const fragProb = frag * 0.002 * (1 + sizePress * 2 + agePress)
+        if (this.rng() < fragProb) {
+          // Propagule size gene (Gao/Traulsen): determines fragment size
+          // Low propaguleSize → release single cells (like slime mold spores)
+          // High propaguleSize → break into multi-cell clusters (like cyanobacteria hormogonia)
+          const propSize = c.g.propaguleSize || 0
+          if (propSize < 0.3) {
+            // Single-cell propagule release: sever ALL links from this cell
+            // The cell becomes a free-swimming propagule that can seed a new group
+            c.linkCount = 0 // will be cleaned up in link force step
+            c._fragmented = true
+          } else {
+            // Multi-cell fragmentation: weaken links so organism splits into clusters
+            // Only sever links on edge cells (interior stays connected)
+            if (c.role !== ROLE_INTERIOR) {
+              c.linkCount = 0
+              c._fragmented = true
+            }
           }
+        }
+      }
+
+      // ── Adhesion co-option (Staps/Tarnita 2019) ──
+      // Scientific basis: ancestral cell-surface proteins that originally bound
+      // extracellular entities were co-opted for cell-cell adhesion. In the model,
+      // the stickiness gene has a dual function: its ancestral role (receptor
+      // sensitivity) AND group formation. Environmental conditions modulate
+      // expression — cells in nutrient-poor areas upregulate adhesion to form
+      // protective groups, while well-fed cells may downregulate it to disperse.
+      // This creates environmentally responsive group formation/dissolution.
+      if (c.g.adhesion > 0.1 && c.age % 32 === 0) {
+        const localFood = this._sampleFood(c.x, c.y)
+        const starvation = localFood < 0.3 ? 1 : 0
+        // Starving cells become stickier (form protective groups)
+        // Well-fed cells become less sticky (disperse to find new patches)
+        if (starvation && c.linkCount === 0) {
+          // Temporarily boost effective adhesion for link formation
+          c._adhesionBoost = Math.min(0.3, c.g.adhesion * 0.5)
+        } else if (localFood > 1.5 && c.linkCount > 0 && frag > 0.1) {
+          // Well-fed + high fragmentation: weaken bonds to disperse
+          c._adhesionBoost = -c.g.fragmentation * 0.2
+        } else {
+          c._adhesionBoost = 0
+        }
+      }
+
+      // ── Sub-timing: end metabolism, start lifecycle ──
+      if ((i & (_CL_SAMPLE - 1)) === 0) {
+        const _t = performance.now()
+        _cl_metabT += _t - _cl_t0
+        _cl_t0 = _t
+      }
+
+      // ── Continuous senescence / aging system (runs every 8 ticks for perf) ──
+      if (c.age % 8 === 0) {
+        const longevity = c.g.longevity || 0.5
+        const baseRate = 0.00096 / (0.3 + longevity * 0.7) // 8x rate since we run 1/8 as often
+
+        // Accelerators (cheap: no sqrt, no complex branching)
+        const eRatio = c.energy < divisionThreshold * 0.5 ? c.energy / (divisionThreshold * 0.5) : 1
+        const starveAccel = eRatio < 0.4 ? (0.4 - eRatio) * 0.006 : 0
+        c.starveTicks = c.energy < 0.5 ? (c.starveTicks || 0) + 8 : c.starveTicks > 0 ? c.starveTicks - 8 : 0
+        if (c.starveTicks < 0) c.starveTicks = 0
+        const chronicStarve = c.starveTicks > 100 ? 0.0024 : 0
+        const speedSq = c.vx * c.vx + c.vy * c.vy // avoid sqrt
+        const moveWear = speedSq * (c.g.speed || 1) * 0.00006
+        const metabWear = ((c.g.metabolism || 1) - 0.8) * 0.00024
+        const toxDmg = (c.g.toxin || 0) * 0.00032
+        const driftDmg = (c.g.driftLoad || 0) * 0.00048
+
+        // Protection factor (single division)
+        const prot =
+          1.0 +
+          (c.g.membrane || 0) * 0.3 +
+          (c.g.toughness || 0) * 0.2 +
+          (c.g.shell || 0) * 0.25 +
+          (c.g.chloroplast || 0) * 0.15 +
+          (eRatio > 0.7 ? (eRatio - 0.7) * 0.3 : 0) +
+          (c.organismSize > 1 ? c.organismSize * 0.02 : 0)
+
+        c.senescence =
+          (c.senescence || 0) +
+          (baseRate + starveAccel + chronicStarve + moveWear + metabWear + toxDmg + driftDmg) / prot
+      }
+
+      // Senescence effects (cheap, every tick)
+      {
+        const sen = c.senescence || 0
+        if (sen > 0.3) {
+          const d = sen - 0.3
+          c.energy -= d * 0.002
+          const slow = d * 0.008
+          c.vx *= 1.0 - slow
+          c.vy *= 1.0 - slow
+        }
+        if (sen > 0.6 && this.rng() < (sen - 0.6) * (sen - 0.6) * 0.06) {
+          this._dropMeat(c.x, c.y, c.energy * 0.8 + 0.3)
+          c._deathCause = 'senescence'
+          c.energy = -1
+        } else if (sen >= 1.0) {
+          this._dropMeat(c.x, c.y, c.energy * 0.9 + 0.2)
+          c._deathCause = 'senescence'
+          c.energy = -1
         }
       }
 
       // Division — sexual or asexual depending on complexity & sexuality gene
       // Body scale: large cells store more energy before dividing (fat reserves)
-      const bodyScaleStorage = (c.g.bodyScale || 1.0) > 1.1 ? 1.0 + ((c.g.bodyScale || 1.0) - 1.0) * 0.5 : 1.0
+      const bodyScaleStorage = (c.g.bodyScale || 1.0) > 1.1 ? 1.0 + ((c.g.bodyScale || 1.0) - 1.0) * 0.3 : 1.0
 
       // ── Logistic growth: soft carrying capacity (Verhulst model) ──
       // Division threshold increases as population approaches K.
@@ -929,10 +1705,38 @@ export function installStep(Sim, getWasmReady) {
       const cachedDens2 = c._cachedDensity || 5
       const alleeEffect = cachedDens2 < 3 ? 1.0 + (3 - cachedDens2) * 0.15 : 1.0
 
+      // ── Selection-drift balance (Lynch 2007, Discovery article) ──
+      // Scientific basis: in small populations, genetic drift overpowers
+      // natural selection. Beneficial mutations are lost and deleterious
+      // ones fix at higher rates. The effective population size determines
+      // the boundary: selection is efficient when Ne*s >> 1, inefficient
+      // when Ne*s << 1. We use local density as a proxy for Ne.
+      // Drift load penalty on reproduction: loaded genomes divide less efficiently
+      const driftDivPenalty = 1.0 + (c.g.driftLoad || 0) * 0.8
+
+      // Senescence penalty on reproduction: aging cells are less fertile
+      // This creates strong selection pressure to reproduce while young
+      const senDivPenalty = 1.0 + Math.max(0, (c.senescence || 0) - 0.2) * 2.5
+
       const sizeCost =
-        (1.0 + Math.max(0, c.organismSize - 4) * 0.03) * bodyScaleStorage * logisticPenalty * alleeEffect
+        (1.0 + Math.max(0, c.organismSize - 4) * 0.06 + Math.max(0, c.organismSize - 15) * 0.12) *
+        bodyScaleStorage *
+        logisticPenalty *
+        alleeEffect *
+        driftDivPenalty *
+        senDivPenalty
+      // Maturation delay: cells must reach minimum age before first division
+      // Scientific basis: G1 phase checkpoint — cells must grow and accumulate
+      // sufficient organelles/proteins before entering S phase (DNA replication).
+      // Young cells also pay a higher division cost (immature cellular machinery).
+      const minDivAge = 60
+      const youthPenalty = c.age < minDivAge * 2 ? 1.0 + (1.0 - c.age / (minDivAge * 2)) * 0.8 : 1.0
       // Hard cap is now a performance safety valve only (set very high)
-      if (c.energy > divisionThreshold * sizeCost && orgCount < maxOrganisms) {
+      if (
+        c.age >= minDivAge &&
+        c.energy > divisionThreshold * sizeCost * youthPenalty &&
+        orgCount < maxOrganisms
+      ) {
         // Determine if this cell requires sexual reproduction
         // sexualDrive: 0 = fully asexual, 1 = fully sexual
         const sexGene = c.g.sexuality || 0
@@ -959,10 +1763,17 @@ export function installStep(Sim, getWasmReady) {
         const mateCell = useSexual ? this.cells[mate] : null
 
         // Energy cost: both parents contribute if sexual
+        // Nurturing gene: parents invest more energy into offspring
+        // Scientific basis: K-strategy vs r-strategy — nurturing species
+        // produce fewer, higher-quality offspring with better survival odds.
+        // Epigenetic abundance memory further boosts parental investment.
+        const nurt = (c.g.nurturing || 0) + ((c.g.epiMarks || {}).abundanceMemory || 0) * 0.1
+        const parentInvest = 0.35 + nurt * 0.15 // 0.35 base, up to 0.50 with max nurturing
+
         let childEnergy
         if (useSexual) {
-          childEnergy = c.energy * 0.35 + mateCell.energy * 0.15
-          c.energy *= 0.65
+          childEnergy = c.energy * parentInvest + mateCell.energy * 0.15
+          c.energy *= 1 - parentInvest
           mateCell.energy *= 0.85
           // Emit mating event for visual effect
           if (!this.mateEvents) this.mateEvents = []
@@ -1024,16 +1835,29 @@ export function installStep(Sim, getWasmReady) {
         const budY = c.y + Math.sin(budAngle) * budDist
 
         // Genome: recombine if sexual, mutate-only if asexual
-        const childGenome = useSexual ? this._recombineGenomes(c.g, mateCell.g) : this._mutateGenome(c.g)
+        // DNA strands are the true genetic material — mutations happen on the strand,
+        // then the phenotype (named genes) is re-interpreted from the mutated strand.
+        const childResult = useSexual
+          ? this._recombineGenomes(c.g, mateCell.g, c.dna, mateCell ? mateCell.dna : null)
+          : this._mutateGenome(c.g, c.dna)
+        const childGenome = childResult.g
+        const childDna = childResult.dna
+
+        // Speciation check: if child genome has diverged enough from the
+        // clade's founder genome, assign a new clade (new species).
+        // This creates the phylogenetic tree tracing all organisms back
+        // to their single-cell ancestors.
+        const childClade = this._maybeSpeciate(c.clade, childGenome)
 
         const child = this._makeCell({
           x: ((budX % this.w) + this.w) % this.w,
           y: ((budY % this.h) + this.h) % this.h,
           energy: childEnergy,
-          clade: c.clade,
-          genome: childGenome
+          clade: childClade,
+          genome: childGenome,
+          dnaStrand: childDna
         })
-        this._registerClade(c.clade, c.g.diet)
+        this._registerClade(childClade, childGenome.diet)
         child.vx = c.vx + randNorm(this.rng) * 0.06
         child.vy = c.vy + randNorm(this.rng) * 0.06
         for (let oi = 0; oi < ORGANELLE_COUNT; oi++) {
@@ -1053,11 +1877,39 @@ export function installStep(Sim, getWasmReady) {
         }
         child.persistDir.x = c.persistDir.x + randNorm(this.rng) * 0.3
         child.persistDir.y = c.persistDir.y + randNorm(this.rng) * 0.3
+
+        // ── Reproductive senescence reset ──
+        // Scientific basis: reproduction reactivates telomerase, resetting
+        // the cellular aging clock. Germ cells are effectively "immortal"
+        // — they pass on rejuvenated DNA to offspring. This gives a strong
+        // evolutionary advantage to organisms that reproduce: they partially
+        // reverse their own aging and create fresh offspring.
+        // Sexual reproduction gives a bigger reset (recombination repairs more damage).
+        const senResetFactor = useSexual ? 0.35 : 0.2
+        c.senescence = Math.max(0, (c.senescence || 0) * (1 - senResetFactor))
+        // Mate also gets a small rejuvenation from sexual reproduction
+        if (useSexual && mateCell) {
+          mateCell.senescence = Math.max(0, (mateCell.senescence || 0) * 0.9)
+        }
+        // Child starts with zero senescence (fresh telomeres)
+        child.senescence = 0
+        child.starveTicks = 0
+        child.lifetimeEnergyGain = 0
+        child.lifetimeMoveDist = 0
+
         this.cells.push(child)
         if (this.birthEvents.length < 20)
           this.birthEvents.push({ x: child.x, y: child.y, clade: child.clade, sexual: useSexual })
 
-        if (c.g.adhesion > 0.25 && c.linkCount < this.cfg.linkMax && child.linkCount < this.cfg.linkMax) {
+        // Organism size gate: don't link if organism is already very large
+        // Scientific basis: diffusion limits — beyond ~20 cells, nutrient/signal
+        // transport becomes a bottleneck without specialized vasculature.
+        if (
+          c.g.adhesion > 0.25 &&
+          c.linkCount < this.cfg.linkMax &&
+          child.linkCount < this.cfg.linkMax &&
+          c.organismSize < 20
+        ) {
           const gamma = this._surfaceTension(c, child)
           // Link rest length governed by compactness gene
           const linkRest = 2.5 + (1 - compact) * 3.0
@@ -1074,6 +1926,26 @@ export function installStep(Sim, getWasmReady) {
       }
     }
 
+    // Lifecycle phase ends here — accumulate final timing
+    {
+      const _t = performance.now()
+      _cl_lifeT += _t - _cl_t0
+    }
+    // Scale sampled sub-timings proportionally to total cellLoop wall time
+    const _cl_sampledTotal = _cl_moveT + _cl_feedT + _cl_metabT + _cl_lifeT
+    if (_cl_sampledTotal > 0.001) {
+      const _cl_totalMs = performance.now() - _sl
+      const _cl_r = _cl_totalMs / _cl_sampledTotal
+      _sp.cl_movement = +(_cl_moveT * _cl_r).toFixed(3)
+      _sp.cl_feeding = +(_cl_feedT * _cl_r).toFixed(3)
+      _sp.cl_metabolism = +(_cl_metabT * _cl_r).toFixed(3)
+      _sp.cl_lifecycle = +(_cl_lifeT * _cl_r).toFixed(3)
+    } else {
+      _sp.cl_movement = _sp.cl_feeding = _sp.cl_metabolism = _sp.cl_lifecycle = 0
+    }
+
+    _sm('cellLoop')
+
     // Linking
     if (this.cells.length > 1) {
       const pop = this.cells.length
@@ -1082,10 +1954,40 @@ export function installStep(Sim, getWasmReady) {
     }
 
     this._applyLinksForces()
+    _sm('links')
+
+    // Clear fragmentation flags after links are processed
+    for (let i = 0; i < this.cells.length; i++) {
+      if (this.cells[i]._fragmented) this.cells[i]._fragmented = false
+    }
+
+    // ── Population-size-dependent drift acceleration (Lynch 2007) ──
+    // Scientific basis: genetic drift is inversely proportional to effective
+    // population size (Ne). In small populations, drift dominates selection,
+    // causing faster accumulation of deleterious mutations and loss of
+    // beneficial ones. This is the "nearly neutral" theory of Ohta (1973).
+    // We accelerate drift load accumulation for cells in small local populations.
+    if (this.t % 32 === 0) {
+      for (let i = 0; i < this.cells.length; i++) {
+        const c = this.cells[i]
+        const localPop = c._cachedDensity || 5
+        // Small local populations: drift load accumulates faster
+        // Large populations: selection efficiently purges deleterious mutations
+        if (localPop < 4 && c.g.driftLoad < 0.8) {
+          const driftAccel = (4 - localPop) * 0.0005
+          c.g.driftLoad = Math.min(1.0, (c.g.driftLoad || 0) + driftAccel)
+        }
+        // Large populations with sexual reproduction can slowly purge drift load
+        if (localPop > 10 && (c.g.sexuality || 0) > 0.2 && c.g.driftLoad > 0) {
+          c.g.driftLoad = Math.max(0, c.g.driftLoad - 0.0002)
+        }
+      }
+    }
 
     if (this.t % predStride === 0 && this.cells.length > 1) {
       this._predation(spatial)
     }
+    _sm('predation')
 
     // Cull dead/old cells and remap link indices
     this.deathEvents = []
@@ -1109,6 +2011,42 @@ export function installStep(Sim, getWasmReady) {
           type: deathType
         })
         if (c.energy > 0.1) this._dropMeat(c.x, c.y, c.energy * this.cfg.meatDropEnergy)
+        // Dead organisms deposit shelter — builds reef/structure over time
+        // Scientific basis: coral skeletons, shell middens, tube worm casings accumulate
+        const _biome = this.getBiomeConfigAt(c.x, c.y)
+        const _shelterRate = _biome ? _biome.shelterRate || 0.5 : 0.5
+        this.depositShelter(c.x, c.y, Math.max(c.energy, 0.3) * _shelterRate * 0.05)
+        // Horizontal gene transfer: nearby cells with HGT gene absorb some DNA
+        // Scientific basis: bacteria acquire genes from lysed neighbors (transformation),
+        // enabling rapid adaptation. Key driver of antibiotic resistance spread.
+        if ((this.t + i) % 8 === 0) {
+          const hgtR2 = 64 // ~8 unit radius
+          for (let j = Math.max(0, i - 15); j < Math.min(this.cells.length, i + 15); j++) {
+            if (j === i) continue
+            const o = this.cells[j]
+            if (o.energy <= 0) continue
+            const hgtCap = o.g.hgt || 0
+            if (hgtCap < 0.05) continue
+            const dx = c.x - o.x,
+              dy = c.y - o.y
+            if (dx * dx + dy * dy > hgtR2) continue
+            // Transfer: blend a small fraction of the dead cell's genes into the survivor
+            const transferRate = hgtCap * 0.08
+            const dg = c.g,
+              og = o.g
+            // Only transfer a few key adaptive genes (not everything)
+            if (this.rng() < transferRate)
+              og.toxinResist = Math.min(1, og.toxinResist + (dg.toxinResist || 0) * 0.1)
+            if (this.rng() < transferRate)
+              og.respiration = Math.min(1, og.respiration + (dg.respiration || 0) * 0.05)
+            if (this.rng() < transferRate)
+              og.immuneStrength = Math.min(1, (og.immuneStrength || 0) + (dg.immuneStrength || 0) * 0.08)
+            if (this.rng() < transferRate)
+              og.dnaRepair = Math.min(1, (og.dnaRepair || 0) + (dg.dnaRepair || 0) * 0.05)
+            if (this.rng() < transferRate * 0.5)
+              og.immuneBits = og.immuneBits ^ ((dg.immuneBits || 0) & (1 << ((this.rng() * 12) | 0)))
+          }
+        }
         // Drop any carried seeds at death location
         if (c.seeds) {
           for (let si = 0; si < c.seeds.length; si++) {
@@ -1186,9 +2124,10 @@ export function installStep(Sim, getWasmReady) {
       // Scientific basis: oxidative stress from competition increases cellular damage.
       // Harman free radical theory — metabolic stress accelerates telomere shortening.
       if (popN > K * 0.5) {
-        const agingAccel = Math.min(3, (popN / K - 0.5) * 4) // 0-3 extra age ticks
+        const crowdSen = Math.min(0.0004, (popN / K - 0.5) * 0.0008)
         for (let i = 0; i < this.cells.length; i++) {
-          this.cells[i].age += agingAccel | 0
+          this.cells[i].senescence = (this.cells[i].senescence || 0) + crowdSen
+          this.cells[i].age += 1 // minor age bump for compatibility
         }
       }
     }
@@ -1203,5 +2142,9 @@ export function installStep(Sim, getWasmReady) {
         })
       )
     }
+
+    _sm('deathCleanup')
+    _sp._total = +(performance.now() - _st).toFixed(3)
+    this.stepProfile = _sp
   }
 }

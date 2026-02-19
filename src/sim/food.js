@@ -63,15 +63,16 @@ export function installFood(Sim) {
   P._growFood = function (mult = 1, foodScarcity = 1.0, sunIntensity = 1.0) {
     // Abiotic nutrient trickle — very slow. Real food comes from photosynthetic cells.
     // This represents chemosynthesis, mineral dissolution, and organic detritus.
-    const baseRate = this.cfg.foodGrowth * mult * 0.00006 * foodScarcity
     const grad = this.gradientField
     const food = this.food
     const w = this.w,
       h = this.h
     const n = food.length
     const cap = 5.0 // max food per cell
-    // Only update a fraction of cells each tick for performance
-    const stride = 8
+    // Scale stride with world area — large worlds need bigger strides
+    const _areaRatio = Math.max(1, Math.round(n / 1843200))
+    const stride = 8 * _areaRatio
+    const baseRate = this.cfg.foodGrowth * mult * 0.00006 * foodScarcity * _areaRatio
     const offset = this.t % stride
 
     // Sun direction for position-dependent photosynthesis
@@ -88,7 +89,9 @@ export function installFood(Sim) {
     const numBiomes = biomes ? biomes.length : 0
     const regionW = numBiomes > 0 ? w / numBiomes : w
 
+    const _mask = this.blobMask
     for (let i = offset; i < n; i += stride) {
+      if (_mask && !_mask[i]) continue // skip pixels outside the blob
       if (food[i] < cap) {
         const g = grad[i] || 0.5
         // Compute local sunlight from position
@@ -217,8 +220,10 @@ export function installFood(Sim) {
 
   P._growMinerals = function () {
     if (this.rng() < this.cfg.mineralGrowth) {
-      const ix = (this.rng() * this.w) | 0
-      const iy = (this.rng() * this.h) | 0
+      let ix = (this.rng() * this.w) | 0
+      let iy = (this.rng() * this.h) | 0
+      // Only grow minerals inside the blob
+      if (this.blobMask && !this.blobMask[ix + iy * this.w]) return
       // Biome-specific mineral growth multiplier
       let biomeMult = 1.0
       const biomes = this.cfg.biomes
@@ -243,7 +248,7 @@ export function installFood(Sim) {
 
     // Global current direction rotates slowly (ocean gyre, ~full rotation per 8000 ticks)
     const currentAngle = t * 0.0008 + Math.sin(t * 0.0003) * 0.5
-    const currentSpeed = 0.35 + 0.15 * Math.sin(t * 0.0005 + 1.7)
+    const currentSpeed = 0.12 + 0.1 * Math.sin(t * 0.0005 + 1.7)
     const gdx = Math.cos(currentAngle) * currentSpeed
     const gdy = Math.sin(currentAngle) * currentSpeed
 
@@ -252,11 +257,13 @@ export function installFood(Sim) {
     const gDyR = Math.round(gdy)
     if (gDxR === 0 && gDyR === 0) return // no drift this tick
 
-    const frac = 0.12
-    // Process every 4th row per tick (cycle through with phase)
-    const phase = t % 4
+    const frac = 0.05
+    // Scale row stride with world area — large worlds process fewer rows per tick
+    const _areaRatio = Math.max(1, Math.round((w * h) / 1843200))
+    const rowStride = 4 * _areaRatio
+    const phase = t % rowStride
 
-    for (let iy = phase; iy < h; iy += 4) {
+    for (let iy = phase; iy < h; iy += rowStride) {
       for (let ix = 0; ix < w; ix++) {
         const si = ix + iy * w
         const val = food[si]
@@ -267,6 +274,8 @@ export function installFood(Sim) {
         const ti = tx + ty * w
 
         if (ti !== si) {
+          // Don't drift food outside the blob
+          if (this.blobMask && !this.blobMask[ti]) continue
           const transfer = val * frac
           food[si] -= transfer
           food[ti] += transfer
@@ -278,8 +287,9 @@ export function installFood(Sim) {
   P._decayMeat = function () {
     const decay = 1 - this.cfg.meatDecay
     const meat = this.meatFood
-    // Process every 4th pixel per tick (cycle through with phase)
-    const stride = 4
+    // Scale stride with world area — large worlds process fewer pixels per tick
+    const _areaRatio = Math.max(1, Math.round(meat.length / 1843200))
+    const stride = 4 * _areaRatio
     const offset = this.t % stride
     const n = meat.length
     for (let i = offset; i < n; i += stride) {

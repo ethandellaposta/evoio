@@ -160,22 +160,34 @@ export function installMorphology(Renderer) {
         _fPts[s][0] = x + tailDx * (r * 0.7 + tailLen * frac) + perpX * wave
         _fPts[s][1] = y + tailDy * (r * 0.7 + tailLen * frac) + perpY * wave
       }
-      // Draw smooth bezier curve through all points
-      ctx.globalAlpha = 0.4 + flagLevel * 0.45
-      ctx.strokeStyle = hsla(160, 65, 55, 0.7)
-      ctx.lineWidth = 1.0 + flagLevel * 1.5
+      // Build the bezier path as a reusable function
+      const _drawFlagPath = () => {
+        ctx.beginPath()
+        ctx.moveTo(_fPts[0][0], _fPts[0][1])
+        for (let s = 0; s < N - 1; s++) {
+          const mx = (_fPts[s][0] + _fPts[s + 1][0]) * 0.5
+          const my = (_fPts[s][1] + _fPts[s + 1][1]) * 0.5
+          ctx.quadraticCurveTo(_fPts[s][0], _fPts[s][1], mx, my)
+        }
+        ctx.lineTo(_fPts[N - 1][0], _fPts[N - 1][1])
+      }
       ctx.lineCap = 'round'
       ctx.lineJoin = 'round'
-      ctx.beginPath()
-      ctx.moveTo(_fPts[0][0], _fPts[0][1])
-      // Catmull-Rom-like smooth curve using quadratic bezier through midpoints
-      for (let s = 0; s < N - 1; s++) {
-        const mx = (_fPts[s][0] + _fPts[s + 1][0]) * 0.5
-        const my = (_fPts[s][1] + _fPts[s + 1][1]) * 0.5
-        ctx.quadraticCurveTo(_fPts[s][0], _fPts[s][1], mx, my)
+      // Energy trail glow (additive) — wide diffuse glow behind flagella
+      if (r > 10) {
+        ctx.globalCompositeOperation = 'lighter'
+        ctx.globalAlpha = 0.12 + flagLevel * 0.1
+        ctx.strokeStyle = hsla(160, 80, 68, 0.4)
+        ctx.lineWidth = 2.5 + flagLevel * 2.5
+        _drawFlagPath()
+        ctx.stroke()
+        ctx.globalCompositeOperation = 'source-over'
       }
-      // Final segment to last point
-      ctx.lineTo(_fPts[N - 1][0], _fPts[N - 1][1])
+      // Main flagella stroke
+      ctx.globalAlpha = 0.45 + flagLevel * 0.45
+      ctx.strokeStyle = hsla(160, 68, 58, 0.75)
+      ctx.lineWidth = 1.0 + flagLevel * 1.5
+      _drawFlagPath()
       ctx.stroke()
       ctx.restore()
     }
@@ -320,8 +332,18 @@ export function installMorphology(Renderer) {
     ctx.quadraticCurveTo(hlMx, hlMy, tipX + perpX * tipWid * 0.5, tipY + perpY * tipWid * 0.5)
     ctx.stroke()
 
+    // Glowing energy tip (additive)
+    if (r > 12) {
+      ctx.globalCompositeOperation = 'lighter'
+      ctx.globalAlpha = 0.2 + prob * 0.15
+      ctx.fillStyle = hsla((hue + 20) % 360, 90, 72, 0.5)
+      ctx.beginPath()
+      ctx.arc(tipX, tipY, tipWid * 1.8, 0, TAU)
+      ctx.fill()
+      ctx.globalCompositeOperation = 'source-over'
+    }
     // Suction opening at tip — darker ring
-    ctx.globalAlpha = 0.3 + prob * 0.3
+    ctx.globalAlpha = 0.35 + prob * 0.3
     ctx.strokeStyle = hsla((hue + 20) % 360, sat, lum - 10, 0.7)
     ctx.lineWidth = 0.5 + prob * 0.5
     ctx.beginPath()
@@ -335,7 +357,7 @@ export function installMorphology(Renderer) {
         const frac = (t * 0.1 + fi * 0.33 + c.id) % 1.0
         const fx = tipX + ndx * tubeLen * 0.3 * (1 - frac)
         const fy = tipY + ndy * tubeLen * 0.3 * (1 - frac)
-        ctx.globalAlpha = 0.3 * frac * (c.eatFlash / 25)
+        ctx.globalAlpha = 0.15 * frac * (c.eatFlash / 25)
         ctx.fillStyle = hsla(120, 60, 70, 0.7)
         ctx.beginPath()
         ctx.arc(fx, fy, 0.5 + frac * 0.8, 0, TAU)
@@ -359,7 +381,7 @@ export function installMorphology(Renderer) {
     const spineWid = r * (0.06 + sp * 0.08)
 
     for (let i = 0; i < count; i++) {
-      const a = (i / count) * TAU + c.id * 0.4
+      const a = (i / count) * TAU + c.clade * 0.4
       // Animated sway
       const sway = Math.sin(t * 0.08 + i * 2.3 + c.id) * 0.06 * sp
       const angle = a + sway
@@ -394,6 +416,23 @@ export function installMorphology(Renderer) {
       ctx.moveTo(bx + perpX * spineWid * 0.5, by + perpY * spineWid * 0.5)
       ctx.quadraticCurveTo(ctrl1x, ctrl1y, tipX, tipY)
       ctx.stroke()
+    }
+    // Batched glowing energy tips (single compositeOp switch for all spines)
+    if (r > 10) {
+      ctx.globalCompositeOperation = 'lighter'
+      ctx.globalAlpha = sp * 0.2
+      ctx.fillStyle = hsla(hue, 90, 82, 0.6)
+      for (let i = 0; i < count; i++) {
+        const a = (i / count) * TAU + c.clade * 0.4
+        const sway = Math.sin(t * 0.08 + i * 2.3 + c.id) * 0.06 * sp
+        const angle = a + sway
+        const tx2 = x + Math.cos(angle) * (r + spineLen)
+        const ty2 = y + Math.sin(angle) * (r + spineLen)
+        ctx.beginPath()
+        ctx.arc(tx2, ty2, spineWid * 1.5, 0, TAU)
+        ctx.fill()
+      }
+      ctx.globalCompositeOperation = 'source-over'
     }
     ctx.restore()
   }
@@ -457,12 +496,23 @@ export function installMorphology(Renderer) {
       ctx.stroke()
     }
 
-    // Tip glint
-    ctx.globalAlpha = 0.3 + sk * 0.2
-    ctx.fillStyle = hsla(hue, sat * 0.3, lum + 30, 0.6)
+    // Crystalline edge highlight
+    ctx.globalAlpha = 0.4 + sk * 0.3
+    ctx.strokeStyle = hsla((hue + 30) % 360, 80, 85, 0.6)
+    ctx.lineWidth = 0.4
     ctx.beginPath()
-    ctx.arc(tipX, tipY, hornWid * 0.3, 0, TAU)
+    ctx.moveTo(baseX + perpX * hornWid, baseY + perpY * hornWid)
+    ctx.quadraticCurveTo(midX + perpX * hornWid * 0.7, midY + perpY * hornWid * 0.7, tipX, tipY)
+    ctx.stroke()
+
+    // Glowing energy tip (additive)
+    ctx.globalCompositeOperation = 'lighter'
+    ctx.globalAlpha = 0.3 + sk * 0.25
+    ctx.fillStyle = hsla((hue + 30) % 360, 90, 80, 0.6)
+    ctx.beginPath()
+    ctx.arc(tipX, tipY, hornWid * 0.6, 0, TAU)
     ctx.fill()
+    ctx.globalCompositeOperation = 'source-over'
 
     ctx.restore()
   }
@@ -480,7 +530,7 @@ export function installMorphology(Renderer) {
 
     for (let i = 0; i < podCount; i++) {
       // Pseudopods slowly rotate and extend/retract
-      const baseAngle = (i / podCount) * TAU + c.id * 0.6
+      const baseAngle = (i / podCount) * TAU + c.clade * 0.6
       const drift = Math.sin(t * 0.015 + i * 2.7 + c.id * 1.3) * 0.4
       const extend = 0.5 + 0.5 * Math.sin(t * 0.02 + i * 3.1 + c.id * 0.8)
       const angle = baseAngle + drift
@@ -567,7 +617,7 @@ export function installMorphology(Renderer) {
       ctx.lineWidth = 0.3
       const divCount = Math.floor(4 + cn * 6)
       for (let d = 0; d < divCount; d++) {
-        const da = (d / divCount) * TAU + c.id * 0.5
+        const da = (d / divCount) * TAU + c.clade * 0.5
         ctx.beginPath()
         ctx.moveTo(x + Math.cos(da) * r * 0.2, y + Math.sin(da) * r * 0.2)
         ctx.lineTo(x + Math.cos(da) * r * 0.95, y + Math.sin(da) * r * 0.95)
@@ -588,8 +638,8 @@ export function installMorphology(Renderer) {
     const plateThick = r * (0.08 + mem * 0.12)
 
     for (let i = 0; i < plateCount; i++) {
-      const a1 = (i / plateCount) * TAU + c.id * 0.3
-      const a2 = ((i + 0.85) / plateCount) * TAU + c.id * 0.3
+      const a1 = (i / plateCount) * TAU + c.clade * 0.3
+      const a2 = ((i + 0.85) / plateCount) * TAU + c.clade * 0.3
       const outerR = r * (1.02 + mem * 0.08)
       const innerR = outerR - plateThick
 
@@ -616,7 +666,7 @@ export function installMorphology(Renderer) {
       ctx.globalAlpha = 0.2 + mem * 0.15
       ctx.fillStyle = hsla(hue, sat * 0.3, lum + 5, 0.6)
       for (let i = 0; i < plateCount; i++) {
-        const a = ((i + 0.425) / plateCount) * TAU + c.id * 0.3
+        const a = ((i + 0.425) / plateCount) * TAU + c.clade * 0.3
         const rx = x + Math.cos(a) * (r * 1.0 + plateThick * 0.3)
         const ry = y + Math.sin(a) * (r * 1.0 + plateThick * 0.3)
         ctx.beginPath()
@@ -636,8 +686,8 @@ export function installMorphology(Renderer) {
 
     const dropCount = 3 + Math.floor(tx * 5)
     for (let i = 0; i < dropCount; i++) {
-      const a = (i / dropCount) * TAU + c.id * 0.9 + t * 0.003
-      const drift = r * (1.05 + 0.15 * Math.sin(t * 0.04 + i * 2.5 + c.id))
+      const a = (i / dropCount) * TAU + c.clade * 0.9 + t * 0.003
+      const drift = r * (1.05 + 0.15 * Math.sin(t * 0.04 + i * 2.5 + c.clade))
       const dx = x + Math.cos(a) * drift
       const dy = y + Math.sin(a) * drift
       const dr = (0.6 + tx * 1.0) * (0.7 + 0.3 * Math.sin(t * 0.06 + i * 3.1))
@@ -722,22 +772,12 @@ export function installMorphology(Renderer) {
     const t = this._frameTick
     ctx.save()
 
-    // Pulsing halo ring
     const pulse = 0.5 + 0.5 * Math.sin(t * 0.04 + c.id * 1.7)
     const haloR = r * (1.4 + sym * 1.2) * (0.95 + pulse * 0.1)
-    ctx.globalAlpha = (0.06 + sym * 0.1) * (0.7 + pulse * 0.3)
-    ctx.strokeStyle = hsla((hue + 40) % 360, sat + 10, lum + 20, 0.4)
-    ctx.lineWidth = 0.6 + sym * 1.2
-    ctx.setLineDash([2 + sym * 3, 2 + sym * 2])
-    ctx.lineDashOffset = -t * 0.15 + (c.id || 0) * 3.1
-    ctx.beginPath()
-    ctx.arc(x, y, haloR, 0, TAU)
-    ctx.stroke()
-    ctx.setLineDash([])
 
     // Inner warm glow
     ctx.globalCompositeOperation = 'lighter'
-    ctx.globalAlpha = sym * 0.06 * (0.6 + pulse * 0.4)
+    ctx.globalAlpha = sym * 0.03 * (0.6 + pulse * 0.4)
     ctx.fillStyle = hsla(40, 60, 65, 0.3)
     ctx.beginPath()
     ctx.arc(x, y, haloR * 0.8, 0, TAU)

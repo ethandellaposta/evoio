@@ -22,6 +22,67 @@ const _tPts = new Array(32)
 for (let i = 0; i < 32; i++) _tPts[i] = [0, 0]
 const _cPts = new Array(16)
 for (let i = 0; i < 16; i++) _cPts[i] = [0, 0]
+// Reusable blob point buffer (max 32 lobes)
+const _blobPtsX = new Float64Array(32)
+const _blobPtsY = new Float64Array(32)
+// Reusable shape descriptor to avoid per-cell object allocation
+const _shapeDesc = { depth: 0.12, chaos: 0, facet: 0, streamline: 0, faceDx: 0, faceDy: 0, phaseSpeed: 1 }
+
+// ── Cached glow texture system ──
+// Pre-render radial glow circles to small offscreen canvases.
+// Keyed by size bucket (rounded to nearest 2px) to limit cache entries.
+// Reuse via drawImage instead of creating radial gradients per cell per frame.
+const _glowCache = new Map()
+const _GLOW_CACHE_MAX = 64
+
+function _getGlowTexture(radius) {
+  // Bucket to nearest 2px to limit cache size
+  const r = Math.max(2, (radius + 1) | 0) & ~1
+  let tex = _glowCache.get(r)
+  if (tex) return tex
+
+  // Evict oldest if cache is full
+  if (_glowCache.size >= _GLOW_CACHE_MAX) {
+    const firstKey = _glowCache.keys().next().value
+    _glowCache.delete(firstKey)
+  }
+
+  const size = r * 2 + 2
+  const c = new OffscreenCanvas(size, size)
+  const ctx = c.getContext('2d')
+  const cx = size / 2,
+    cy = size / 2
+  const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r)
+  grad.addColorStop(0, 'rgba(255,255,255,1)')
+  grad.addColorStop(0.3, 'rgba(255,255,255,0.5)')
+  grad.addColorStop(0.7, 'rgba(255,255,255,0.15)')
+  grad.addColorStop(1, 'rgba(255,255,255,0)')
+  ctx.fillStyle = grad
+  ctx.fillRect(0, 0, size, size)
+
+  tex = { canvas: c, size, r }
+  _glowCache.set(r, tex)
+  return tex
+}
+
+// ── Cached color string memoization ──
+// hsla() string creation is expensive when called 5000+ times per frame.
+// Cache the last N unique color strings.
+const _colorCache = new Map()
+const _COLOR_CACHE_MAX = 256
+
+function _cachedHsla(h, s, l, a) {
+  const key = (h | 0) * 1000000 + (s | 0) * 10000 + (l | 0) * 100 + ((a * 100) | 0)
+  let v = _colorCache.get(key)
+  if (v) return v
+  if (_colorCache.size >= _COLOR_CACHE_MAX) {
+    const firstKey = _colorCache.keys().next().value
+    _colorCache.delete(firstKey)
+  }
+  v = `hsla(${h | 0},${s | 0}%,${l | 0}%,${a})`
+  _colorCache.set(key, v)
+  return v
+}
 
 export function installCells(Renderer) {
   const P = Renderer.prototype
@@ -29,14 +90,11 @@ export function installCells(Renderer) {
   // Elongated rod/oval path for cells with high elongation gene
   P._elongPath = function (ctx, x, y, r, phase, id, elongation, faceDx, faceDy) {
     const elong = 0.3 + elongation * 1.4
-    const pts = []
     const lobes = 12
     for (let i = 0; i < lobes; i++) {
       const a = (i / lobes) * TAU
-      // Stretch along facing direction
       const cosA = Math.cos(a)
       const sinA = Math.sin(a)
-      // Project angle onto facing direction
       const dot = cosA * faceDx + sinA * faceDy
       const stretch = 1.0 + Math.abs(dot) * elong
       const squeeze = 1.0 - Math.abs(cosA * -faceDy + sinA * faceDx) * elong * 0.3
@@ -46,18 +104,19 @@ export function installCells(Renderer) {
         (1.0 +
           0.06 * Math.sin(phase + a * 2.0 + id * 1.7) +
           0.04 * Math.sin(phase * 0.7 + a * 3.0 + id * 0.9))
-      pts.push({
-        x: x + Math.cos(a) * r * deform,
-        y: y + Math.sin(a) * r * deform
-      })
+      _blobPtsX[i] = x + cosA * r * deform
+      _blobPtsY[i] = y + sinA * r * deform
     }
     ctx.beginPath()
-    ctx.moveTo((pts[pts.length - 1].x + pts[0].x) / 2, (pts[pts.length - 1].y + pts[0].y) / 2)
-    for (let i = 0; i < pts.length; i++) {
-      const next = pts[(i + 1) % pts.length]
-      const mx = (pts[i].x + next.x) / 2
-      const my = (pts[i].y + next.y) / 2
-      ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my)
+    ctx.moveTo((_blobPtsX[lobes - 1] + _blobPtsX[0]) * 0.5, (_blobPtsY[lobes - 1] + _blobPtsY[0]) * 0.5)
+    for (let i = 0; i < lobes; i++) {
+      const ni = (i + 1) % lobes
+      ctx.quadraticCurveTo(
+        _blobPtsX[i],
+        _blobPtsY[i],
+        (_blobPtsX[i] + _blobPtsX[ni]) * 0.5,
+        (_blobPtsY[i] + _blobPtsY[ni]) * 0.5
+      )
     }
     ctx.closePath()
   }
@@ -74,7 +133,6 @@ export function installCells(Renderer) {
   P._blobPath = function (ctx, x, y, r, phase, id, nLobes, amoeboid, shape) {
     const lobes = nLobes || 7
     const am = amoeboid || 0
-    // Unpack shape descriptor (backward-compatible: old callers pass no shape)
     const depth = shape ? shape.depth : 0.12
     const chaos = shape ? shape.chaos : 0
     const facet = shape ? shape.facet : 0
@@ -84,70 +142,56 @@ export function installCells(Renderer) {
     const phaseSpd = shape ? shape.phaseSpeed || 1 : 1
 
     const effectivePhase = phase * phaseSpd
-    const pts = []
+    const _ft = this._frameTick
+    const lobeAngle = TAU / lobes
     for (let i = 0; i < lobes; i++) {
-      const a = (i / lobes) * TAU
+      const a = i * lobeAngle
       const cosA = Math.cos(a)
       const sinA = Math.sin(a)
 
-      // ── Base organic deformation — depth controls amplitude ──
       let deform =
         1.0 +
         depth * Math.sin(effectivePhase + a * 2.0 + id * 1.7) +
         depth * 0.58 * Math.sin(effectivePhase * 0.7 + a * 3.0 + id * 0.9) +
         depth * 0.42 * Math.cos(a * 5.0 + id * 2.3)
 
-      // ── Chaos — per-lobe random-ish irregularity from mutRate ──
       if (chaos > 0.01) {
-        // Deterministic pseudo-random offset per lobe+id
         const hash = Math.sin(id * 12.9898 + i * 78.233) * 43758.5453
-        const noise = (hash - Math.floor(hash)) * 2 - 1 // -1..1
-        deform += chaos * 0.18 * noise
-        // Slow temporal jitter
-        deform += chaos * 0.08 * Math.sin(this._frameTick * 0.03 + i * 5.1 + id * 3.3)
+        deform += chaos * 0.18 * ((hash - (hash | 0)) * 2 - 1)
+        deform += chaos * 0.08 * Math.sin(_ft * 0.03 + i * 5.1 + id * 3.3)
       }
 
-      // ── Faceting — membrane gene makes edges more angular/flat ──
-      // Achieved by sharpening the lobe peaks (pushing toward polygon)
       if (facet > 0.01) {
-        // Pull deformation toward quantized angles (polygon effect)
-        const lobeAngle = TAU / lobes
         const nearestLobe = Math.round(a / lobeAngle) * lobeAngle
-        const angleDist = Math.abs(a - nearestLobe) / (lobeAngle * 0.5) // 0 at lobe center, 1 at midpoint
-        // Faceted cells have flatter sides between lobes
+        const angleDist = Math.abs(a - nearestLobe) / (lobeAngle * 0.5)
         deform += facet * 0.06 * (angleDist * 2 - 1)
       }
 
-      // ── Streamline — speed gene squashes toward teardrop ──
       if (stream > 0.01) {
-        const dot = cosA * sFdx + sinA * sFdy // alignment with facing
-        // Stretch forward, pinch sides
-        const stretch = dot * stream * 0.25 // elongate in facing dir
-        const cross = cosA * -sFdy + sinA * sFdx // perpendicular
-        const pinch = -Math.abs(cross) * stream * 0.12 // narrow sides
-        deform += stretch + pinch
+        const dot = cosA * sFdx + sinA * sFdy
+        const cross = cosA * -sFdy + sinA * sFdx
+        deform += dot * stream * 0.25 - Math.abs(cross) * stream * 0.12
       }
 
-      // ── Amoeboid: large slow-shifting asymmetric bulges ──
       if (am > 0.1) {
-        const t = this._frameTick
-        deform += am * 0.3 * Math.sin(t * 0.012 + a * 1.5 + id * 2.1)
-        deform += am * 0.2 * Math.sin(t * 0.018 + a * 2.7 + id * 0.6)
-        deform += am * 0.15 * Math.cos(t * 0.008 + a * 0.8 + id * 3.4)
+        deform += am * 0.3 * Math.sin(_ft * 0.012 + a * 1.5 + id * 2.1)
+        deform += am * 0.2 * Math.sin(_ft * 0.018 + a * 2.7 + id * 0.6)
+        deform += am * 0.15 * Math.cos(_ft * 0.008 + a * 0.8 + id * 3.4)
       }
 
-      pts.push({
-        x: x + cosA * r * deform,
-        y: y + sinA * r * deform
-      })
+      _blobPtsX[i] = x + cosA * r * deform
+      _blobPtsY[i] = y + sinA * r * deform
     }
     ctx.beginPath()
-    ctx.moveTo((pts[pts.length - 1].x + pts[0].x) / 2, (pts[pts.length - 1].y + pts[0].y) / 2)
-    for (let i = 0; i < pts.length; i++) {
-      const next = pts[(i + 1) % pts.length]
-      const mx = (pts[i].x + next.x) / 2
-      const my = (pts[i].y + next.y) / 2
-      ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my)
+    ctx.moveTo((_blobPtsX[lobes - 1] + _blobPtsX[0]) * 0.5, (_blobPtsY[lobes - 1] + _blobPtsY[0]) * 0.5)
+    for (let i = 0; i < lobes; i++) {
+      const ni = i + 1 < lobes ? i + 1 : 0
+      ctx.quadraticCurveTo(
+        _blobPtsX[i],
+        _blobPtsY[i],
+        (_blobPtsX[i] + _blobPtsX[ni]) * 0.5,
+        (_blobPtsY[i] + _blobPtsY[ni]) * 0.5
+      )
     }
     ctx.closePath()
   }
@@ -171,7 +215,8 @@ export function installCells(Renderer) {
     const trackId = trackTarget ? trackTarget.id : null
 
     const _vs = this.view.scale
-    const _glowDim = Math.min(1, 1 / _vs)
+    const _paused = this._opts && this._opts.paused
+    const _glowDim = _paused ? 1.0 : Math.min(1, 1 / _vs)
     const _vcx = this.view.cx
     const _vcy = this.view.cy
     const _hw = this.canvas.width * 0.5
@@ -180,6 +225,35 @@ export function installCells(Renderer) {
     const _ch = this.canvas.height
     const _sw = sim.w
     const _sh = sim.h
+
+    // ── Low-fidelity flags (hoisted for inner loop) ──
+    const _lf = this.lofi
+    const _lofiOn = _lf.enabled
+    const _doMorph = !_lofiOn && _lf.morphology
+    const _doOrganelles = !_lofiOn && _lf.organelles
+    const _doGlow = !_lofiOn && _lf.glow
+
+    // LOD budget caps — driven by adaptive quality feedback loop
+    // When paused: no budget caps, no LOD bias — full detail for all
+    let _lod3Count = 0,
+      _lod4Count = 0
+    const _lod3Max = _paused ? Infinity : this._lod3Budget || 200
+    const _lod4Max = _paused ? Infinity : this._lod4Budget || 40
+
+    // Population-driven LOD bias: raises pixel thresholds so more cells
+    // fall into cheaper LOD tiers at high population
+    const _lodBias = _paused ? 0 : this._lodBias || 0
+
+    // ── LOD 0 batching: collect dots into hue buckets, flush once at end ──
+    const _LOD0_BUCKETS = 24 // 15° per bucket — more color variety at distance
+    const _lod0Buckets = new Array(_LOD0_BUCKETS)
+    for (let bi = 0; bi < _LOD0_BUCKETS; bi++) _lod0Buckets[bi] = null
+    // Filtered dots go into a separate single bucket
+    let _lod0FilteredPath = null
+
+    // ── LOD 1 batching: collect simple circles into hue buckets ──
+    const _lod1Buckets = new Array(_LOD0_BUCKETS)
+    for (let bi = 0; bi < _LOD0_BUCKETS; bi++) _lod1Buckets[bi] = null
 
     // ── Pre-compute organism bounding circle for tracked cell ──
     // So the selection highlight covers the whole organism, not just one cell
@@ -345,35 +419,82 @@ export function installCells(Renderer) {
 
         if (x < -50 || x > _cw + 50 || y < -50 || y > _ch + 50) continue
 
-        if (filtered) ctx.globalAlpha = 0.06
+        // ── Filtered cells: skip expensive pipeline, batch as dim dots ──
+        if (filtered) {
+          const _filtR = baseR * 1.05
+          if (!_lod0FilteredPath) _lod0FilteredPath = []
+          _lod0FilteredPath.push(x, y, _filtR)
+          continue
+        }
 
         // ── Compute creature metrics ──
         const rc = ROLE_COLORS[c.role] || ROLE_COLORS[ROLE_NONE]
         const baseHue = cladeHue(c.clade)
-        const dietShift = c.g.diet * 55 - 15
-        const hueShiftVal = (c.g.hueShift || 0) * 120
+        // Strong diet-driven hue: herbivores → green/cyan, carnivores → red/orange
+        // diet 0 = pure herbivore, diet 1 = pure carnivore
+        const _diet = c.g.diet
+        let dietHue
+        if (_diet > 0.6)
+          dietHue = 0 + (_diet - 0.6) * 40 // 0-16° (red-orange)
+        else if (_diet < 0.25)
+          dietHue = 120 + (0.25 - _diet) * 80 // 120-140° (green-cyan)
+        else dietHue = 60 - (_diet - 0.25) * 60 // 60-39° (yellow-orange transition)
+        // Blend: diet dominance increases with diet extremity
+        const dietWeight =
+          _diet > 0.6 ? 0.55 + (_diet - 0.6) * 0.6 : _diet < 0.25 ? 0.45 + (0.25 - _diet) * 0.5 : 0.25
+        const hueShiftVal = (c.g.hueShift || 0) * 180
         // Morphology-driven hue tints: toxin→sickly green, spines→warm orange, flagella→cool blue
         const morphHueShift =
-          (c.g.toxin || 0) * -25 +
-          (c.g.spines || 0) * 15 +
-          (c.g.flagella || 0) * -10 +
-          (c.g.biolum || 0) * 20 +
-          (c.g.amoeboid || 0) * -8
-        const hue = (baseHue + rc.hShift + dietShift + hueShiftVal + morphHueShift + 720) % 360
+          (c.g.toxin || 0) * -40 +
+          (c.g.spines || 0) * 25 +
+          (c.g.flagella || 0) * -18 +
+          (c.g.biolum || 0) * 35 +
+          (c.g.amoeboid || 0) * -15 +
+          (c.g.membrane || 0) * 12 +
+          (c.g.chloroplast || 0) * -30 +
+          (c.g.elongation || 0) * 10
+        const cladeContrib = baseHue + rc.hShift + hueShiftVal + morphHueShift
+        const hue = (cladeContrib * (1 - dietWeight) + dietHue * dietWeight + 720) % 360
         const brightnessGene = c.g.brightness || 0
         // Per-clade sat/lum offsets give each species a unique color personality
         const cSatOff = cladeSatOffset(c.clade)
         const cLumOff = cladeLumOffset(c.clade)
         // Wider ranges: membrane→desaturated, adhesion→brighter, diet→more saturated
+        // Senescence visual deterioration: aging cells desaturate and dim
+        const senLevel = c.senescence || 0
+        const senDesaturate = senLevel > 0.2 ? Math.min(30, (senLevel - 0.2) * 38) : 0
+        const senDim = senLevel > 0.3 ? Math.min(15, (senLevel - 0.3) * 22) : 0
+        // Carnivores: high saturation, warm and intense
+        // Herbivores: moderate saturation, cooler and softer
+        const dietSatBoost = _diet > 0.6 ? (_diet - 0.6) * 35 : _diet < 0.25 ? (0.25 - _diet) * 15 : 0
         const sat = clamp(
-          65 + rc.satBoost + c.g.diet * 18 - brightnessGene * 10 + cSatOff - (c.g.membrane || 0) * 12,
-          30,
-          98
+          60 +
+            rc.satBoost +
+            dietSatBoost -
+            brightnessGene * 15 +
+            cSatOff * 1.5 -
+            (c.g.membrane || 0) * 18 +
+            (c.g.chloroplast || 0) * 12 +
+            (c.g.toxin || 0) * 10 -
+            senDesaturate,
+          15,
+          100
         )
+        // Carnivores: slightly darker/deeper, herbivores: brighter/lighter
+        const dietLumShift = _diet > 0.6 ? -(_diet - 0.6) * 14 : _diet < 0.25 ? (0.25 - _diet) * 10 : 0
         const lum = clamp(
-          48 + 12 * c.g.adhesion + rc.lumBoost + brightnessGene * 18 + cLumOff - (c.g.toxin || 0) * 8,
-          28,
-          82
+          44 +
+            14 * c.g.adhesion +
+            rc.lumBoost +
+            brightnessGene * 28 +
+            cLumOff * 1.5 -
+            (c.g.toxin || 0) * 12 -
+            (c.g.membrane || 0) * 6 +
+            (c.g.biolum || 0) * 10 -
+            senDim +
+            dietLumShift,
+          18,
+          88
         )
 
         const energyScale = clamp(0.9 + c.energy * 0.05, 0.85, 1.25)
@@ -382,11 +503,26 @@ export function installCells(Renderer) {
         const complexScale = 1 + (c.complexity || 0) * 0.04
         const ageScale = 1 + Math.min(c.age / 600, 1) * 0.25
         const bodyScaleGene = c.g.bodyScale || 1.0
-        const r = baseR * energyScale * vacScale * memScale * complexScale * ageScale * bodyScaleGene
+        // Role-based specialization: cells in different positions scale differently
+        const roleScale = 1.0 + (rc.scaleBoost || 0)
+        // Senescence shrinkage: very old cells physically shrink as they deteriorate
+        const senShrink = senLevel > 0.4 ? 1.0 - Math.min(0.25, (senLevel - 0.4) * 0.42) : 1.0
+        const r =
+          baseR *
+          energyScale *
+          vacScale *
+          memScale *
+          complexScale *
+          ageScale *
+          bodyScaleGene *
+          roleScale *
+          senShrink
 
         // Breathing animation — energy-rich cells pulse more visibly
-        const breathAmp = 0.02 + clamp(c.energy * 0.012, 0, 0.06)
-        const breathFreq = 0.04 + (c.g.metabolism || 1) * 0.025
+        // Per-cell phase (c.id) so each cell breathes independently
+        const senBreathDamp = senLevel > 0.3 ? 1.0 - Math.min(0.7, (senLevel - 0.3) * 1.0) : 1.0
+        const breathAmp = (0.02 + clamp(c.energy * 0.012, 0, 0.06)) * senBreathDamp
+        const breathFreq = (0.04 + (c.g.metabolism || 1) * 0.025) * (1.0 - senLevel * 0.3)
         const breathe =
           1.0 +
           breathAmp * Math.sin(t * breathFreq + c.id * 2.3) +
@@ -407,22 +543,61 @@ export function installCells(Renderer) {
         const orgSize = c.organismSize || 1
         const _orgGlowDamp = orgSize > 1 ? 1.0 / (1.0 + (orgSize - 1) * 0.35) : 1.0
 
+        // Membrane merge factor: interior cells in multicellular organisms
+        // fade their membrane so adjacent cells visually merge together.
+        // 0 = full membrane (single cell or edge), 1 = fully suppressed (deep interior)
+        const _linkCount = c.linkCount || 0
+        const _mergeFade = _linkCount >= 2 ? clamp((_linkCount - 1) * 0.35, 0, 0.85) : 0
+
         // ── LOD (Level of Detail) based on screen-space size ──
         // LOD 0: drawR < 2   → colored dot only
         // LOD 1: drawR < 5   → blob + membrane stroke
         // LOD 2: drawR < 10  → + basic glow, body shape
-        // LOD 3: drawR < 18  → + morphology, organelles, indicators
-        // LOD 4: drawR >= 18 → full detail (speed lines, sense cone, etc.)
-        const lod = drawR < 2 ? 0 : drawR < 5 ? 1 : drawR < 10 ? 2 : drawR < 18 ? 3 : 4
+        // LOD 3: drawR < 25  → + morphology, organelles, indicators
+        // LOD 4: drawR >= 25 → full detail (speed lines, sense cone, etc.)
+        // Budget caps prevent catastrophic slowdown at high zoom
+        // LOD thresholds shifted by _lodBias (population pressure)
+        // Focused cells: ignore _lodBias + lower thresholds for LOD boost
+        const _r = drawR
+        const _focused = isTrackedClade || isTrackedCell
+        const _bias = _focused ? 0 : _lodBias
+        let lod
+        if (_paused) {
+          // Super-res paused mode: minimum LOD 3 for anything visible, LOD 4 if > 1.5px
+          lod = _r < 0.5 ? 2 : _r < 1.5 ? 3 : 4
+        } else {
+          lod =
+            _r < 2 + _bias
+              ? 0
+              : _r < (_focused ? 3 : 5 + _bias * 1.5)
+                ? 1
+                : _r < (_focused ? 6 : 10 + _bias * 2)
+                  ? 2
+                  : _r < (_focused ? 14 : 25 + _bias * 2.5)
+                    ? 3
+                    : 4
+        }
+        // Focused cells bypass budget caps — they always get full detail
+        if (!_focused) {
+          if (lod >= 4 && _lod4Count >= _lod4Max) lod = 3
+          if (lod >= 3 && _lod3Count >= _lod3Max) lod = 2
+        }
+        if (lod >= 4) _lod4Count++
+        if (lod >= 3) _lod3Count++
 
-        // ── LOD 0: Just a colored dot ──
+        // ── LOD 0: Defer to batched draw ──
         if (lod === 0) {
-          ctx.globalAlpha = filtered ? 0.06 : 0.8
-          ctx.fillStyle = hsl(hue, sat, lum)
-          ctx.beginPath()
-          ctx.arc(x, y, drawR, 0, TAU)
-          ctx.fill()
-          if (filtered) ctx.globalAlpha = 1
+          const bucket = ((hue / 15) | 0) % _LOD0_BUCKETS
+          if (!_lod0Buckets[bucket]) _lod0Buckets[bucket] = { h: hue, s: sat, l: lum, pts: [] }
+          _lod0Buckets[bucket].pts.push(x, y, drawR)
+          continue
+        }
+
+        // ── LOD 1: Batch simple filled+stroked circles ──
+        if (lod === 1) {
+          const bucket = ((hue / 15) | 0) % _LOD0_BUCKETS
+          if (!_lod1Buckets[bucket]) _lod1Buckets[bucket] = { h: hue, s: sat, l: lum, pts: [] }
+          _lod1Buckets[bucket].pts.push(x, y, drawR)
           continue
         }
 
@@ -432,15 +607,15 @@ export function installCells(Renderer) {
           const lineCount = 2 + Math.floor(speedFactor * 2)
           const lineLen = drawR * (1.5 + speedFactor * 3.0)
           ctx.lineCap = 'round'
-          const slStyle = hsla(hue, sat * 0.5, lum + 20, 0.4)
+          const slStyle = _cachedHsla(hue, sat * 0.5, lum + 20, 0.4)
           for (let li = 0; li < lineCount; li++) {
             const spread = (li / (lineCount - 1 || 1) - 0.5) * 0.6
             const perpX = -faceDy,
               perpY = faceDx
             const sx = x - faceDx * drawR * 0.5 + perpX * drawR * spread
             const sy = y - faceDy * drawR * 0.5 + perpY * drawR * spread
-            const ex = sx - faceDx * lineLen * (0.6 + 0.4 * Math.sin(c.id * 3 + li * 2.1))
-            const ey = sy - faceDy * lineLen * (0.6 + 0.4 * Math.sin(c.id * 3 + li * 2.1))
+            const ex = sx - faceDx * lineLen * (0.6 + 0.4 * Math.sin(c.clade * 3 + li * 2.1))
+            const ey = sy - faceDy * lineLen * (0.6 + 0.4 * Math.sin(c.clade * 3 + li * 2.1))
             ctx.globalAlpha = speedFactor * 0.12 * (1 - (li / lineCount) * 0.5)
             ctx.strokeStyle = slStyle
             ctx.lineWidth = (1.5 - li * 0.3) * (drawR / 12)
@@ -457,14 +632,14 @@ export function installCells(Renderer) {
           const coneAngle = 0.5 + (1 - c.g.diet) * 0.4
           const faceAngle = Math.atan2(faceDy, faceDx)
           ctx.globalAlpha = 0.03 + c.g.sense * 0.04
-          ctx.fillStyle = hsla(hue, sat * 0.35, 80, 0.12)
+          ctx.fillStyle = _cachedHsla(hue, sat * 0.35, 80, 0.12)
           ctx.beginPath()
           ctx.moveTo(x, y)
           ctx.arc(x, y, senseR, faceAngle - coneAngle, faceAngle + coneAngle)
           ctx.closePath()
           ctx.fill()
           ctx.globalAlpha = 0.06 + c.g.sense * 0.05
-          ctx.strokeStyle = hsla(hue, sat * 0.3, 85, 0.15)
+          ctx.strokeStyle = _cachedHsla(hue, sat * 0.3, 85, 0.15)
           ctx.lineWidth = 0.5
           ctx.beginPath()
           ctx.arc(x, y, senseR, faceAngle - coneAngle, faceAngle + coneAngle)
@@ -529,14 +704,14 @@ export function installCells(Renderer) {
             const perpX = -faceDy,
               perpY = faceDx
             ctx.globalAlpha = divProgress * 0.2
-            ctx.strokeStyle = hsla(hue, sat * 0.3, lum - 20, 0.4)
+            ctx.strokeStyle = _cachedHsla(hue, sat * 0.3, lum - 20, 0.4)
             ctx.lineWidth = 0.5 + divProgress * 1.0
             ctx.beginPath()
             ctx.moveTo(x + perpX * drawR * (1 - pinchDepth * 0.3), y + perpY * drawR * (1 - pinchDepth * 0.3))
             ctx.lineTo(x - perpX * drawR * (1 - pinchDepth * 0.3), y - perpY * drawR * (1 - pinchDepth * 0.3))
             ctx.stroke()
             ctx.globalAlpha = divProgress * 0.15
-            ctx.fillStyle = hsla((hue + 180) % 360, 70, 75, 0.4)
+            ctx.fillStyle = _cachedHsla((hue + 180) % 360, 70, 75, 0.4)
             ctx.beginPath()
             ctx.arc(x + faceDx * drawR * 0.5, y + faceDy * drawR * 0.5, drawR * 0.2, 0, TAU)
             ctx.fill()
@@ -548,7 +723,7 @@ export function installCells(Renderer) {
 
         // ── Photosynthesis glow — green shimmer on cells with chloroplasts in sunlight ──
         const cellChloroplast = c.g.chloroplast || 0
-        if (lod >= 3 && cellChloroplast > 0.1 && sim.sunIntensity > 0.3) {
+        if (_doGlow && lod >= 3 && cellChloroplast > 0.1 && sim.sunIntensity > 0.3) {
           const sunAngle = sim.sunAngle || 0
           const sunDx = Math.cos(sunAngle)
           const sunDy = Math.sin(sunAngle)
@@ -563,18 +738,18 @@ export function installCells(Renderer) {
             ctx.globalCompositeOperation = 'lighter'
             const glowX = x + sunDx * drawR * 0.3
             const glowY = y + sunDy * drawR * 0.3
-            ctx.globalAlpha = photoStr * 0.08 * _orgGlowDamp
+            ctx.globalAlpha = photoStr * 0.04 * _orgGlowDamp
             ctx.fillStyle = 'rgba(80,220,60,0.4)'
             ctx.beginPath()
             ctx.arc(glowX, glowY, drawR * 1.3, 0, TAU)
             ctx.fill()
             if (lod >= 4 && photoStr > 0.2) {
               const spotCount = Math.min(4, 2 + Math.floor(photoStr * 3))
-              ctx.globalAlpha = photoStr * 0.12 * _orgGlowDamp
+              ctx.globalAlpha = photoStr * 0.06 * _orgGlowDamp
               ctx.fillStyle = 'rgba(100,255,80,0.5)'
               for (let si = 0; si < spotCount; si++) {
-                const sa = (si / spotCount) * TAU + c.id * 1.7 + t * 0.02
-                const sd = drawR * (0.3 + 0.2 * Math.sin(c.id * 3 + si * 2.1))
+                const sa = (si / spotCount) * TAU + c.clade * 1.7 + t * 0.02
+                const sd = drawR * (0.3 + 0.2 * Math.sin(c.clade * 3 + si * 2.1))
                 ctx.beginPath()
                 ctx.arc(x + Math.cos(sa) * sd, y + Math.sin(sa) * sd, drawR * 0.1, 0, TAU)
                 ctx.fill()
@@ -584,40 +759,62 @@ export function installCells(Renderer) {
           }
         }
 
-        // ── Bioluminescent glow ──
-        if (lod >= 2) {
+        // ── Radiant energy aura (legendary card-art style) ──
+        if (_doGlow && lod >= 2) {
           const eLev = clamp(c.energy / 3.5, 0, 1)
           const biolum = c.g.biolum || 0
           const glowBoost = biolum * 2.0
-          const glowR = drawR * (2.5 + eLev * 1.5 + cxMorph * 0.8 + glowBoost)
-          ctx.globalCompositeOperation = 'lighter'
-          ctx.globalAlpha = (0.08 + eLev * 0.08 + cxMorph * 0.03 + biolum * 0.1) * _glowDim * _orgGlowDamp
-          ctx.fillStyle = hsla(hue, sat, lum + 15, 0.3)
-          ctx.beginPath()
-          ctx.arc(x, y, glowR, 0, TAU)
-          ctx.fill()
-          if (lod >= 3) {
-            ctx.globalAlpha = (0.05 + eLev * 0.06 + biolum * 0.08) * _glowDim * _orgGlowDamp
-            ctx.fillStyle = hsla(hue, sat * 0.5, lum + 25, 0.5)
-            ctx.beginPath()
-            ctx.arc(x, y, drawR * 0.5, 0, TAU)
-            ctx.fill()
+          const _pauseGlowBoost = _paused ? 1.001 : 1.0
+          const glowAlpha =
+            (0.04 + eLev * 0.05 + cxMorph * 0.015 + biolum * 0.07 + (rc.glowBoost || 0)) *
+            _glowDim *
+            _orgGlowDamp *
+            _pauseGlowBoost
+          if (glowAlpha > 0.005) {
+            ctx.globalCompositeOperation = 'lighter'
+            if (lod >= 3) {
+              // Full glow texture (expensive drawImage — only at LOD 3+)
+              const glowR = drawR * (1.9 + eLev * 1.0 + cxMorph * 0.5 + glowBoost * 0.7)
+              if (glowR > 1) {
+                const tex = _getGlowTexture(glowR)
+                ctx.globalAlpha = glowAlpha
+                ctx.drawImage(tex.canvas, x - tex.size / 2, y - tex.size / 2, tex.size, tex.size)
+              }
+            } else {
+              // LOD 2: cheap circle glow (no drawImage)
+              ctx.globalAlpha = glowAlpha * 0.7
+              ctx.fillStyle = 'rgba(255,255,255,0.3)'
+              ctx.beginPath()
+              ctx.arc(x, y, drawR * 1.4, 0, TAU)
+              ctx.fill()
+            }
+            // Layer 2: Complementary shimmer ring (high zoom only)
+            if (lod >= 4 && drawR > 10) {
+              const shimmerHue = (hue + 30 + ((c.clade * 17) % 60)) % 360
+              ctx.globalAlpha = (0.04 + biolum * 0.06) * _glowDim * _orgGlowDamp
+              ctx.strokeStyle = _cachedHsla(shimmerHue, 90, 70, 0.5)
+              ctx.lineWidth = 0.5 + biolum * 0.8
+              ctx.beginPath()
+              ctx.arc(x, y, drawR * 1.6, 0, TAU)
+              ctx.stroke()
+            }
+            // Layer 3: Bioluminescent pulse ring
+            if (biolum > 0.2 && lod >= 4) {
+              const bPulse = 0.5 + 0.5 * Math.sin(t * 0.05 + c.id * 2.1)
+              const ringR = drawR * (1.5 + biolum * 1.8) * (0.9 + bPulse * 0.2)
+              ctx.globalAlpha = biolum * 0.06 * (0.6 + bPulse * 0.4) * _glowDim * _orgGlowDamp
+              ctx.strokeStyle = _cachedHsla((hue + 60) % 360, sat + 20, lum + 30, 0.5)
+              ctx.lineWidth = 0.8 + biolum * 1.5
+              ctx.beginPath()
+              ctx.arc(x, y, ringR, 0, TAU)
+              ctx.stroke()
+            }
+            ctx.globalCompositeOperation = 'source-over'
           }
-          if (biolum > 0.2 && lod >= 3) {
-            const bPulse = 0.5 + 0.5 * Math.sin(t * 0.05 + c.id * 2.1)
-            const ringR = drawR * (1.5 + biolum * 1.8) * (0.9 + bPulse * 0.2)
-            ctx.globalAlpha = biolum * 0.1 * (0.6 + bPulse * 0.4) * _glowDim * _orgGlowDamp
-            ctx.strokeStyle = hsla((hue + 60) % 360, sat + 20, lum + 30, 0.5)
-            ctx.lineWidth = 0.8 + biolum * 1.5
-            ctx.beginPath()
-            ctx.arc(x, y, ringR, 0, TAU)
-            ctx.stroke()
-          }
-          ctx.globalCompositeOperation = 'source-over'
         }
 
         // ── Toxin cloud (drawn behind body) ──
-        if ((c.g.toxin || 0) > 0.2 && lod >= 2) {
+        if (_doGlow && (c.g.toxin || 0) > 0.2 && lod >= 2) {
           const tx = c.g.toxin
           const toxR = drawR * (1.6 + tx * 2.0)
           const toxPulse = 0.5 + 0.5 * Math.sin(t * 0.04 + c.id * 3.1)
@@ -686,7 +883,9 @@ export function installCells(Renderer) {
           }
 
           // ── Morphology appendages (drawn behind body) ──
-          if (lod >= 3) {
+          // Only draw expensive appendages when cell is large enough to see them
+          // Focused cells get morphology at smaller sizes
+          if (_doMorph && lod >= 3 && drawR > (_focused ? 6 : 14)) {
             this._drawStalk(ctx, c, x, y, drawR, hue, sat, lum)
             this._drawMorphology(ctx, c, x, y, drawR, hue, sat, lum)
             this._drawPaddleFins(ctx, c, x, y, drawR, hue, sat, lum)
@@ -697,24 +896,27 @@ export function installCells(Renderer) {
           }
 
           // ── Body shape — driven by underlying cell metrics ──
-          // Lobe count: carnivores few & deep (star), herbivores many & smooth (round)
+          // Lobe count: carnivores few & deep (star/spiky), herbivores many & smooth (round/blobby)
           let lobes
-          if (c.g.diet > 0.6) lobes = 4 + Math.floor(ageMorph * 1 + cxMorph * 1)
-          else if (c.g.diet < 0.25) lobes = 10 + Math.floor(ageMorph * 3 + cxMorph * 3)
-          else lobes = 7 + Math.floor(ageMorph * 2 + cxMorph * 2)
+          if (_diet > 0.6) lobes = 3 + Math.floor(ageMorph * 1 + cxMorph * 1 + (c.g.membrane || 0) * 1)
+          else if (_diet < 0.25) lobes = 11 + Math.floor(ageMorph * 3 + cxMorph * 3 + (c.g.adhesion || 0) * 3)
+          else lobes = 6 + Math.floor(ageMorph * 2 + cxMorph * 2 + (c.g.spines || 0) * 4)
 
           // Depth: well-fed cells are plump (low deformation), starving cells are jagged
+          // Carnivores always have deeper lobes → spikier, more aggressive silhouette
           const fullness = clamp(c.energy / (c.g.division * 0.6), 0, 1)
-          const shapeDepth = 0.04 + (1 - fullness) * 0.18 + c.g.diet * 0.06
+          const carnDepth = _diet > 0.6 ? (_diet - 0.6) * 0.35 : 0
+          const herbSmooth = _diet < 0.25 ? (0.25 - _diet) * -0.08 : 0
+          const shapeDepth = 0.05 + (1 - fullness) * 0.22 + carnDepth + herbSmooth + (c.g.spines || 0) * 0.08
 
           // Chaos: high mutation rate → irregular, chaotic outline
           const shapeChaos = clamp(((c.g.mutRate || 0.05) - 0.03) * 4, 0, 1)
 
           // Facet: high membrane gene → angular/armored edges (diatom-like)
-          const shapeFacet = clamp((c.g.membrane || 0) - 0.15, 0, 1) * 0.8
+          const shapeFacet = clamp((c.g.membrane || 0) - 0.1, 0, 1) * 1.2
 
           // Streamline: fast cells get a subtle teardrop squash toward facing
-          const shapeStream = clamp(c.g.speed - 0.8, 0, 1) * 0.6
+          const shapeStream = clamp(c.g.speed - 0.6, 0, 1) * 0.8
 
           // Phase speed: high metabolism → faster membrane ripple
           const shapePhaseSpd = 0.6 + (c.g.metabolism || 1) * 0.5
@@ -722,177 +924,306 @@ export function installCells(Renderer) {
           const morphPhase = c.membranePhase + ageMorph * 0.5 + Math.sin(c.age * 0.005) * 0.3
           const cellElong = c.g.elongation || 0
 
-          // Build shape descriptor
-          const _shape = {
-            depth: shapeDepth,
-            chaos: shapeChaos,
-            facet: shapeFacet,
-            streamline: shapeStream,
-            faceDx: faceDx,
-            faceDy: faceDy,
-            phaseSpeed: shapePhaseSpd
-          }
+          // Reuse pre-allocated shape descriptor
+          _shapeDesc.depth = shapeDepth
+          _shapeDesc.chaos = shapeChaos
+          _shapeDesc.facet = shapeFacet
+          _shapeDesc.streamline = shapeStream
+          _shapeDesc.faceDx = faceDx
+          _shapeDesc.faceDy = faceDy
+          _shapeDesc.phaseSpeed = shapePhaseSpd
 
           if (drawR < 3.5) {
             ctx.beginPath()
             ctx.arc(x, y, drawR, 0, TAU)
           } else if (cellElong > 0.2) {
-            this._elongPath(ctx, x, y, drawR, morphPhase, c.id, cellElong, faceDx, faceDy)
+            this._elongPath(ctx, x, y, drawR, morphPhase, c.clade, cellElong, faceDx, faceDy)
           } else {
-            this._blobPath(ctx, x, y, drawR, morphPhase, c.id, lobes, c.g.amoeboid || 0, _shape)
+            this._blobPath(ctx, x, y, drawR, morphPhase, c.clade, lobes, c.g.amoeboid || 0, _shapeDesc)
           }
 
-          // ── Body fill — opacity reflects energy (well-fed=solid, starving=translucent) ──
-          const fillAlpha = 0.35 + fullness * 0.3
+          // ── Body fill — flat color + cheap specular highlight at high zoom ──
+          const fillAlpha = 0.4 + fullness * 0.35
           ctx.globalAlpha = fillAlpha
-          ctx.fillStyle = hsl(hue, sat * 0.6, clamp(lum + 8, 42, 78))
+          const fillHueShift = ((c.g.pattern ?? 0.5) - 0.5) * 30
+          const fillHue = (hue + fillHueShift + 360) % 360
+          ctx.fillStyle = hsl(fillHue, sat * 0.55, clamp(lum + 6 + brightnessGene * 8, 32, 82))
           ctx.fill()
+          // Specular highlight — small bright arc (cheap metallic look)
+          if (_doGlow && lod >= 4 && drawR > 8) {
+            ctx.globalAlpha = 0.18 + fullness * 0.12
+            ctx.fillStyle = _cachedHsla(fillHue, sat * 0.3, 93, 0.7)
+            ctx.beginPath()
+            ctx.arc(x - drawR * 0.22, y - drawR * 0.22, drawR * 0.38, 0, TAU)
+            ctx.fill()
+          }
 
           // ── Membrane — glowing edge with granular texture ──
-          ctx.globalAlpha = 1
+          // Interior multicellular cells fade their membrane to merge visually
+          const _memAlpha = 1 - _mergeFade
+          ctx.globalAlpha = _memAlpha
           const neonLum = clamp(lum + 22, 55, 88)
           const neonSat = clamp(sat + 15, 60, 100)
-          const memThick = 0.8 + c.g.membrane * 2.5 + cxMorph * 0.6
+          const memThick = 0.8 + c.g.membrane * 2.5 + cxMorph * 0.6 + (rc.memBoost || 0) * 2.0
 
+          // Outer glow edge (additive) — legendary card energy border
+          if (lod >= 4 && drawR > 8 && _memAlpha > 0.1) {
+            ctx.save()
+            ctx.globalCompositeOperation = 'lighter'
+            ctx.globalAlpha = (0.1 + c.g.membrane * 0.12) * _memAlpha
+            ctx.strokeStyle = _cachedHsla(hue, 90, 80, 0.4)
+            ctx.lineWidth = memThick + 1.5 + c.g.membrane * 1.5
+            ctx.stroke()
+            ctx.restore()
+          }
           // Main bright membrane line
-          ctx.strokeStyle = hsla(hue, neonSat, neonLum, 0.6 + c.g.membrane * 0.25)
-          ctx.lineWidth = memThick
-          ctx.stroke()
+          if (_memAlpha > 0.05) {
+            ctx.globalAlpha = _memAlpha
+            ctx.strokeStyle = _cachedHsla(hue, neonSat, neonLum, (0.65 + c.g.membrane * 0.25) * _memAlpha)
+            ctx.lineWidth = memThick
+            ctx.stroke()
+          }
 
           // ── Membrane granules / bumps ──
-          if (lod >= 4) {
-            const granCount = Math.min(8, 6 + Math.floor(c.g.membrane * 4))
+          if (lod >= 4 && drawR > 22 && _memAlpha > 0.3) {
+            const granCount = Math.min(5, 4 + Math.floor(c.g.membrane * 2))
             ctx.globalAlpha = 0.15 + c.g.membrane * 0.15
-            ctx.fillStyle = hsla(hue, neonSat - 5, neonLum + 5, 0.7)
+            ctx.fillStyle = _cachedHsla(hue, neonSat - 5, neonLum + 5, 0.7)
             for (let gi = 0; gi < granCount; gi++) {
-              const ga = (gi / granCount) * TAU + c.id * 0.9
-              const gWobble = 1.0 + 0.04 * Math.sin(t * 0.06 + gi * 2.3 + c.id)
+              const ga = (gi / granCount) * TAU + c.clade * 0.9
+              const gWobble = 1.0 + 0.04 * Math.sin(t * 0.06 + gi * 2.3 + c.clade)
               const gx = x + Math.cos(ga) * drawR * gWobble
               const gy = y + Math.sin(ga) * drawR * gWobble
-              const gr = 0.3 + c.g.membrane * 0.5 + 0.2 * Math.sin(c.id * 3 + gi)
+              const gr = 0.3 + c.g.membrane * 0.5 + 0.2 * Math.sin(c.clade * 3 + gi)
               ctx.beginPath()
               ctx.arc(gx, gy, gr, 0, TAU)
               ctx.fill()
             }
           }
 
+          // ── Body patterns — spots / stripes / rings driven by pattern gene ──
+          if (lod >= 3 && drawR > 6) {
+            const pat = c.g.pattern ?? 0.5
+            const pScale = c.g.patternScale ?? 0.5
+            // Pattern type: 0-0.33 = spots, 0.33-0.66 = stripes, 0.66-1 = rings
+            const patHue = (hue + 150 + pat * 60) % 360
+            const patAlpha = 0.12 + pScale * 0.18
+            if (pat < 0.33) {
+              // Spots — scattered dots with contrasting color
+              const spotCount = 3 + Math.floor(pScale * 5)
+              const spotR = drawR * (0.08 + pScale * 0.1)
+              ctx.fillStyle = _cachedHsla(patHue, sat * 0.8, lum + 15, patAlpha * 2.5)
+              for (let si = 0; si < spotCount; si++) {
+                const sa = (si / spotCount) * TAU + c.clade * 2.3
+                const sd = drawR * (0.25 + 0.35 * ((c.clade * 7 + si * 5.3) % 1))
+                ctx.globalAlpha = patAlpha
+                ctx.beginPath()
+                ctx.arc(x + Math.cos(sa) * sd, y + Math.sin(sa) * sd, spotR, 0, TAU)
+                ctx.fill()
+              }
+            } else if (pat < 0.66) {
+              // Stripes — curved bands across the body
+              const stripeCount = 2 + Math.floor(pScale * 3)
+              ctx.strokeStyle = _cachedHsla(patHue, sat * 0.7, lum + 10, patAlpha * 2.0)
+              ctx.lineWidth = 0.5 + pScale * 1.5
+              ctx.lineCap = 'round'
+              // Stripe direction based on cell id for consistency
+              const stripeAngle = (c.clade * 1.618) % Math.PI
+              const cosS = Math.cos(stripeAngle)
+              const sinS = Math.sin(stripeAngle)
+              for (let si = 0; si < stripeCount; si++) {
+                const offset = ((si + 0.5) / stripeCount - 0.5) * drawR * 1.4
+                const sx = x + cosS * offset
+                const sy = y + sinS * offset
+                const perpLen = drawR * 0.7
+                ctx.globalAlpha = patAlpha * (1 - Math.abs(offset) / (drawR * 0.8))
+                ctx.beginPath()
+                ctx.moveTo(sx - sinS * perpLen, sy + cosS * perpLen)
+                ctx.quadraticCurveTo(
+                  sx + cosS * drawR * 0.1 * Math.sin(c.clade + si),
+                  sy + sinS * drawR * 0.1 * Math.sin(c.clade + si),
+                  sx + sinS * perpLen,
+                  sy - cosS * perpLen
+                )
+                ctx.stroke()
+              }
+            } else {
+              // Rings — concentric circles
+              const ringCount = 1 + Math.floor(pScale * 2)
+              ctx.strokeStyle = _cachedHsla(patHue, sat * 0.7, lum + 12, patAlpha * 2.2)
+              ctx.lineWidth = 0.4 + pScale * 1.0
+              for (let ri = 0; ri < ringCount; ri++) {
+                const ringR = drawR * (0.35 + ri * 0.25)
+                if (ringR > drawR * 0.9) continue
+                ctx.globalAlpha = patAlpha * (1 - ri * 0.25)
+                ctx.beginPath()
+                ctx.arc(x, y, ringR, 0, TAU)
+                ctx.stroke()
+              }
+            }
+            ctx.globalAlpha = 1
+          }
+
+          // ── Diet indicator: predator eye / herbivore chloroplast glow ──
+          if (lod >= 3 && drawR > 5) {
+            if (_diet > 0.55) {
+              // Predator: menacing slit-pupil eye in facing direction
+              const eyeDist = drawR * 0.35
+              const eyeR = drawR * (0.14 + _diet * 0.08)
+              const ex = x + faceDx * eyeDist
+              const ey = y + faceDy * eyeDist
+              // Eye white (slightly warm)
+              ctx.globalAlpha = 0.7 + _diet * 0.2
+              ctx.fillStyle = _cachedHsla(40, 15, 92, 0.9)
+              ctx.beginPath()
+              ctx.arc(ex, ey, eyeR, 0, TAU)
+              ctx.fill()
+              // Pupil — slit for high diet, rounder for omnivores
+              const pupilW = eyeR * (0.3 + (1 - _diet) * 0.4)
+              const pupilH = eyeR * 0.85
+              const faceAngle = Math.atan2(faceDy, faceDx)
+              ctx.fillStyle = _diet > 0.75 ? '#1a0505' : '#2a1010'
+              ctx.beginPath()
+              ctx.ellipse(ex, ey, pupilW, pupilH, faceAngle, 0, TAU)
+              ctx.fill()
+              // Iris color: red-orange for aggressive predators
+              if (drawR > 8) {
+                ctx.globalAlpha = 0.4
+                ctx.fillStyle = _cachedHsla(hue, 90, 45, 0.6)
+                ctx.beginPath()
+                ctx.arc(ex, ey, eyeR * 0.7, 0, TAU)
+                ctx.fill()
+                // Redraw pupil on top
+                ctx.globalAlpha = 0.9
+                ctx.fillStyle = _diet > 0.75 ? '#1a0505' : '#2a1010'
+                ctx.beginPath()
+                ctx.ellipse(ex, ey, pupilW, pupilH, faceAngle, 0, TAU)
+                ctx.fill()
+              }
+            } else if (_diet < 0.2 && (c.g.chloroplast || 0) > 0.15) {
+              // Herbivore with chloroplast: soft green inner glow
+              ctx.globalAlpha = 0.12 + c.g.chloroplast * 0.15
+              ctx.fillStyle = _cachedHsla(130, 70, 55, 0.4)
+              ctx.beginPath()
+              ctx.arc(x, y, drawR * 0.65, 0, TAU)
+              ctx.fill()
+            }
+            ctx.globalAlpha = 1
+          }
+
           // ── On-body morphology overlays ──
-          if (lod >= 3) {
+          if (_doMorph && lod >= 3 && drawR > (_focused ? 6 : 14)) {
             this._drawConstrictions(ctx, c, x, y, drawR, hue, sat, lum)
             this._drawArmorPlates(ctx, c, x, y, drawR, hue, sat, lum)
             this._drawToxinDroplets(ctx, c, x, y, drawR, hue, sat, lum)
             this._drawShell(ctx, c, x, y, drawR, hue, sat, lum)
-          }
-          // Symbiosis aura drawn at LOD 2+ (visible at medium zoom)
-          if (lod >= 2) {
             this._drawSymbiosisAura(ctx, c, x, y, drawR, hue, sat, lum)
           }
 
           // ── Vesicle surface bumps ──
-          if (lod >= 3 && (c.g.vesicles || 0) > 0.1) {
+          if (lod >= 4 && (c.g.vesicles || 0) > 0.15) {
             const ves = c.g.vesicles
-            const vesCount = Math.min(8, 4 + Math.floor(ves * 6))
+            const vesCount = Math.min(4, 2 + Math.floor(ves * 3))
+            ctx.globalAlpha = 0.4 + ves * 0.3
+            ctx.fillStyle = _cachedHsla((hue + 30) % 360, sat * 0.7, lum + 18, 0.8)
             for (let vi = 0; vi < vesCount; vi++) {
-              const va = (vi / vesCount) * TAU + c.id * 1.4
-              const vPulse = 1.0 + 0.15 * Math.sin(t * 0.07 + vi * 2.7 + c.id)
-              const vDist = drawR * (0.88 + 0.08 * Math.sin(t * 0.04 + vi * 1.3))
-              const vx2 = x + Math.cos(va) * vDist
-              const vy2 = y + Math.sin(va) * vDist
-              const vr = (0.6 + ves * 1.8 + 0.3 * Math.sin(c.id * 5 + vi)) * vPulse
-              // Vesicle glow — simple circle
-              ctx.globalAlpha = 0.1 + ves * 0.12
-              ctx.fillStyle = hsla((hue + 30) % 360, sat, lum + 15, 0.4)
+              const va = (vi / vesCount) * TAU + c.clade * 1.4
+              const vDist = drawR * 0.88
+              const vr = 0.6 + ves * 1.8
               ctx.beginPath()
-              ctx.arc(vx2, vy2, vr * 1.5, 0, TAU)
+              ctx.arc(x + Math.cos(va) * vDist, y + Math.sin(va) * vDist, vr, 0, TAU)
               ctx.fill()
-              // Vesicle body
-              ctx.globalAlpha = 0.4 + ves * 0.4
-              ctx.fillStyle = hsla((hue + 30) % 360, sat * 0.7, lum + 18, 0.8)
-              ctx.beginPath()
-              ctx.arc(vx2, vy2, vr, 0, TAU)
-              ctx.fill()
-              // Highlight
-              ctx.globalAlpha = 0.3 + ves * 0.2
-              ctx.fillStyle = 'rgba(255,255,255,0.5)'
-              ctx.beginPath()
-              ctx.arc(vx2 - vr * 0.25, vy2 - vr * 0.25, vr * 0.35, 0, TAU)
-              ctx.fill()
-              // Secretion particle trail (small dots drifting outward)
-              if (ves > 0.2 && vi % 3 === 0) {
-                const secPhase = t * 0.06 + vi * 4.1 + c.id
-                const secDist = drawR * (1.1 + 0.4 * ((secPhase * 0.3) % 1))
-                const secAlpha = 0.15 * (1 - ((secPhase * 0.3) % 1))
-                if (secAlpha > 0.02) {
-                  ctx.globalAlpha = secAlpha
-                  ctx.fillStyle = hsla((hue + 30) % 360, sat * 0.5, lum + 20, 0.6)
-                  ctx.beginPath()
-                  ctx.arc(x + Math.cos(va) * secDist, y + Math.sin(va) * secDist, vr * 0.4, 0, TAU)
-                  ctx.fill()
-                }
-              }
             }
           }
 
-          // ── Internal ER-like network ──
-          if (lod >= 4 && cxMorph > 0.3) {
+          // ── Internal ER-like network (only at highest zoom) ──
+          if (lod >= 4 && cxMorph > 0.5 && drawR > 22) {
             ctx.globalAlpha = 0.04 + cxMorph * 0.06
-            ctx.strokeStyle = hsla((hue + 90) % 360, sat * 0.3, lum + 15, 0.3)
+            ctx.strokeStyle = _cachedHsla((hue + 90) % 360, sat * 0.3, lum + 15, 0.3)
             ctx.lineWidth = 0.3 + cxMorph * 0.3
-            const netCount = 3 + Math.floor(cxMorph * 4)
+            const netCount = Math.min(4, 2 + Math.floor(cxMorph * 2))
             for (let ni = 0; ni < netCount; ni++) {
-              const na1 = (ni / netCount) * TAU + c.id * 0.8
-              const na2 = na1 + 0.8 + Math.sin(c.id * 3 + ni) * 0.5
-              const nd1 = drawR * (0.15 + 0.3 * Math.sin(c.id + ni * 2.1))
-              const nd2 = drawR * (0.2 + 0.35 * Math.sin(c.id * 2 + ni * 1.7))
-              const nx1 = x + Math.cos(na1) * nd1
-              const ny1 = y + Math.sin(na1) * nd1
-              const nx2 = x + Math.cos(na2) * nd2
-              const ny2 = y + Math.sin(na2) * nd2
-              const ncx = x + Math.cos((na1 + na2) / 2) * drawR * 0.5 * Math.sin(t * 0.01 + ni)
-              const ncy = y + Math.sin((na1 + na2) / 2) * drawR * 0.5 * Math.sin(t * 0.01 + ni + 1)
+              const na1 = (ni / netCount) * TAU + c.clade * 0.8
+              const na2 = na1 + 0.8 + Math.sin(c.clade * 3 + ni) * 0.5
+              const nd1 = drawR * (0.15 + 0.3 * Math.sin(c.clade + ni * 2.1))
+              const nd2 = drawR * (0.2 + 0.35 * Math.sin(c.clade * 2 + ni * 1.7))
               ctx.beginPath()
-              ctx.moveTo(nx1, ny1)
-              ctx.quadraticCurveTo(ncx, ncy, nx2, ny2)
+              ctx.moveTo(x + Math.cos(na1) * nd1, y + Math.sin(na1) * nd1)
+              ctx.quadraticCurveTo(
+                x + Math.cos((na1 + na2) / 2) * drawR * 0.5,
+                y + Math.sin((na1 + na2) / 2) * drawR * 0.5,
+                x + Math.cos(na2) * nd2,
+                y + Math.sin(na2) * nd2
+              )
               ctx.stroke()
             }
           }
 
           // ── Organelles ──
-          if (lod >= 3) {
-            // Nucleus — large bright glowing core (like images 1, 2 — the dominant inner sphere)
+          if (_doOrganelles && lod >= 3) {
+            // Nucleus — bright glowing core
             const nucLevel = c.organelles[ORGANELLE_NUCLEUS]
             if (nucLevel > 0.05) {
               const nucPulse = 1.0 + 0.1 * Math.sin(t * 0.045 + c.id)
               const nucR = (drawR * 0.28 + nucLevel * drawR * 0.22) * nucPulse
               const nucHue = (hue + 180) % 360
-              // Nucleus body — bright internal glow
-              ctx.globalAlpha = 0.7 + nucLevel * 0.25
+              // Glow halo behind nucleus (additive, high zoom only)
+              if (lod >= 4 && nucR > 3) {
+                ctx.save()
+                ctx.globalCompositeOperation = 'lighter'
+                ctx.globalAlpha = 0.12 + nucLevel * 0.1
+                const nucGlowTex = _getGlowTexture(nucR * 1.8)
+                ctx.drawImage(
+                  nucGlowTex.canvas,
+                  x - nucGlowTex.size / 2,
+                  y - nucGlowTex.size / 2,
+                  nucGlowTex.size,
+                  nucGlowTex.size
+                )
+                ctx.restore()
+              }
+              // Nucleus body — flat fill
+              ctx.globalAlpha = 0.75 + nucLevel * 0.2
               ctx.fillStyle = hsl(nucHue, 80, 68)
               ctx.beginPath()
               ctx.arc(x, y, nucR, 0, TAU)
               ctx.fill()
-              // Nucleolus — bright spot
+              // Nucleolus — bright specular spot
               if (nucLevel > 0.2) {
-                ctx.globalAlpha = 0.6 + nucLevel * 0.35
-                ctx.fillStyle = hsla(nucHue, 65, 94, 0.95)
+                ctx.globalAlpha = 0.65 + nucLevel * 0.3
+                ctx.fillStyle = hsla(nucHue, 65, 95, 0.95)
                 ctx.beginPath()
                 ctx.arc(x - nucR * 0.15, y - nucR * 0.1, nucR * 0.25, 0, TAU)
                 ctx.fill()
               }
             }
 
-            // Mitochondria — glowing orange-red bean shapes orbiting
+            // Mitochondria — power generators with energy halos
             const mitoLevel = c.organelles[ORGANELLE_MITOCHONDRIA]
             if (mitoLevel > 0.06) {
               const mitoCount = Math.min(3, 1 + Math.floor(mitoLevel * 3))
-              ctx.globalAlpha = 0.65 + mitoLevel * 0.3
-              ctx.fillStyle = hsl(15, 90, 55)
               for (let mi = 0; mi < mitoCount; mi++) {
-                const ma = (mi / mitoCount) * TAU + c.id * 0.7
+                const ma = (mi / mitoCount) * TAU + c.clade * 0.7
                 const md = drawR * 0.4
                 const mr = drawR * 0.07 * (1.0 + mitoLevel * 0.6)
+                const mx2 = x + Math.cos(ma) * md,
+                  my2 = y + Math.sin(ma) * md
+                // Mito energy halo (additive)
+                if (lod >= 4) {
+                  ctx.save()
+                  ctx.globalCompositeOperation = 'lighter'
+                  ctx.globalAlpha = 0.12 + mitoLevel * 0.08
+                  ctx.fillStyle = 'hsla(15,90%,65%,0.35)'
+                  ctx.beginPath()
+                  ctx.arc(mx2, my2, mr * 2.0, 0, TAU)
+                  ctx.fill()
+                  ctx.restore()
+                }
+                // Mito body
+                ctx.globalAlpha = 0.7 + mitoLevel * 0.25
+                ctx.fillStyle = hsl(15, 92, 58)
                 ctx.beginPath()
-                ctx.arc(x + Math.cos(ma) * md, y + Math.sin(ma) * md, mr, 0, TAU)
+                ctx.arc(mx2, my2, mr, 0, TAU)
                 ctx.fill()
               }
             }
@@ -917,7 +1248,7 @@ export function installCells(Renderer) {
             if (c.eatFlash > 0 && lod >= 3) {
               const digestProgress = 1 - c.eatFlash / 25 // 0 = just ate, 1 = fully digested
               const foodAlpha = (1 - digestProgress * digestProgress) * 0.6
-              const foodCount = Math.max(1, Math.min(5, Math.ceil(3 * (1 - digestProgress))))
+              const foodCount = Math.min(2, Math.ceil(2 * (1 - digestProgress)))
               ctx.save()
               for (let fi = 0; fi < foodCount; fi++) {
                 // Scatter food particles inside the cell, slowly drifting inward
@@ -1318,40 +1649,25 @@ export function installCells(Renderer) {
             if (cellElong > 0.2) {
               this._elongPath(ctx, x, y, drawR * 1.08, morphPhase, c.id, cellElong, faceDx, faceDy)
             } else {
-              this._blobPath(ctx, x, y, drawR * 1.08, morphPhase, c.id, lobes, c.g.amoeboid || 0, _shape)
+              this._blobPath(ctx, x, y, drawR * 1.08, morphPhase, c.id, lobes, c.g.amoeboid || 0, _shapeDesc)
             }
             ctx.stroke()
             ctx.restore()
           }
 
           // ── Role visual indicators ──
-          if (c.role === ROLE_PIONEER && lod >= 2) {
-            ctx.save()
-            ctx.globalAlpha = 0.2
-            ctx.globalCompositeOperation = 'lighter'
-            ctx.strokeStyle = 'rgba(35,213,171,0.5)'
-            ctx.lineWidth = 1.2
-            ctx.setLineDash([3, 4])
-            ctx.lineDashOffset = -t * 0.3 + (c.id || i) * 2.7
-            ctx.beginPath()
-            ctx.arc(x, y, drawR + 2.5, 0, TAU)
-            ctx.stroke()
-            ctx.setLineDash([])
-            ctx.restore()
-          } else if (c.role === ROLE_INTERIOR && lod >= 2) {
-            ctx.save()
+          if (c.role === ROLE_INTERIOR && lod >= 2) {
             ctx.globalAlpha = 0.12
             ctx.fillStyle = hsla(hue, sat * 0.4, lum * 0.5, 0.3)
             ctx.beginPath()
             ctx.arc(x, y, drawR * 0.45, 0, TAU)
             ctx.fill()
-            ctx.restore()
           }
 
           // ── Sociality — wispy feeler tendrils with bulb tips ──
-          if (lod >= 3) {
+          if (lod >= 4) {
             const social = c.g.sociality ?? 0
-            if (social > 0.25) {
+            if (social > 0.3) {
               ctx.save()
               ctx.lineCap = 'round'
               const antCount = social > 0.6 ? 3 : 2
@@ -1391,12 +1707,12 @@ export function installCells(Renderer) {
           }
 
           // ── Mutation rate — faint sparkle particles ──
-          if (lod >= 3) {
+          if (lod >= 4) {
             const mr = c.g.mutRate ?? 0.05
-            if (mr > 0.1) {
-              const mrLevel = Math.min(1, (mr - 0.1) * 6.7)
+            if (mr > 0.12) {
+              const mrLevel = Math.min(1, (mr - 0.12) * 6.7)
               ctx.save()
-              const sparkCount = 2 + Math.floor(mrLevel * 4)
+              const sparkCount = Math.min(3, 1 + Math.floor(mrLevel * 2))
               for (let si = 0; si < sparkCount; si++) {
                 const sparkPhase = t * 0.2 + c.id * 7 + si * 3.7
                 const sparkAlpha = (Math.sin(sparkPhase) * 0.5 + 0.5) * mrLevel * 0.3
@@ -1419,21 +1735,19 @@ export function installCells(Renderer) {
           // ── Cooperation — warm inner glow ──
           if (lod >= 2 && (c.cooperationScore || 0) > 0.01) {
             const coopLevel = Math.min(1, c.cooperationScore / 0.05)
-            ctx.save()
             ctx.globalAlpha = coopLevel * 0.08 * _orgGlowDamp
             ctx.globalCompositeOperation = 'lighter'
             ctx.fillStyle = hsla(40, 65, 65, 0.4)
             ctx.beginPath()
             ctx.arc(x, y, drawR * 0.7, 0, TAU)
             ctx.fill()
-            ctx.restore()
+            ctx.globalCompositeOperation = 'source-over'
           }
 
           // ── Toughness — double membrane ──
-          if (lod >= 2 && (c.g.toughness || 0) > 0.15) {
+          if (lod >= 3 && (c.g.toughness || 0) > 0.15 && _memAlpha > 0.15) {
             const tough = c.g.toughness
-            ctx.save()
-            ctx.globalAlpha = 0.08 + tough * 0.15
+            ctx.globalAlpha = (0.08 + tough * 0.15) * _memAlpha
             ctx.strokeStyle = hsla(hue, sat * 0.7, lum * 0.8, 0.5)
             ctx.lineWidth = 0.8 + tough * 2.0
             this._blobPath(
@@ -1445,37 +1759,41 @@ export function installCells(Renderer) {
               c.id + 50,
               lobes,
               0,
-              _shape
+              _shapeDesc
             )
             ctx.stroke()
-            ctx.restore()
           }
 
           // ── Multicellular extra membrane ──
-          if (c.linkCount > 0 && lod >= 2) {
-            ctx.save()
-            ctx.globalAlpha = (0.12 + Math.min(c.linkCount * 0.03, 0.1)) * _orgGlowDamp
+          if (c.linkCount > 0 && lod >= 3 && _memAlpha > 0.15) {
+            ctx.globalAlpha = (0.12 + Math.min(c.linkCount * 0.03, 0.1)) * _orgGlowDamp * _memAlpha
             ctx.strokeStyle = hsla(hue, sat + 10, lum + 15, 0.35)
             ctx.lineWidth = 0.5 + c.linkCount * 0.1
             this._blobPath(ctx, x, y, drawR + 1.5, c.membranePhase * 0.97, c.id + 100, 6)
             ctx.stroke()
-            ctx.restore()
+          }
+
+          // ── Senescence visual deterioration — single dark overlay ──
+          if (lod >= 3 && senLevel > 0.35) {
+            const decay = Math.min(1, (senLevel - 0.35) * 1.54)
+            ctx.globalAlpha = decay * 0.18
+            ctx.fillStyle = 'rgba(30,20,10,0.7)'
+            ctx.beginPath()
+            ctx.arc(x, y, drawR * 0.7, 0, TAU)
+            ctx.fill()
           }
 
           // ── Organism depth — darker interior cells ──
-          if (lod >= 2 && c.organismDepth >= 2) {
-            ctx.save()
+          if (lod >= 3 && c.organismDepth >= 2) {
             ctx.globalAlpha = Math.min(0.2, c.organismDepth * 0.05)
             ctx.fillStyle = hsla(hue, sat * 0.3, lum * 0.35, 0.5)
             ctx.beginPath()
             ctx.arc(x, y, drawR * 0.55, 0, TAU)
             ctx.fill()
-            ctx.restore()
           }
 
           // ── Apoptosis — faint dissolving marks ──
           if (lod >= 3 && (c.g.apoptosis || 0) > 0.15 && c.organismDepth >= 2) {
-            ctx.save()
             ctx.globalAlpha = c.g.apoptosis * 0.2
             ctx.strokeStyle = 'rgba(200,180,255,0.4)'
             ctx.lineWidth = 0.4
@@ -1486,12 +1804,10 @@ export function installCells(Renderer) {
             ctx.moveTo(x + xs, y - xs)
             ctx.lineTo(x - xs, y + xs)
             ctx.stroke()
-            ctx.restore()
           }
 
           // ── Tracked species glow (all members of focused clade) ──
           if (isTrackedClade && !isTrackedCell && lod >= 1) {
-            ctx.save()
             ctx.globalCompositeOperation = 'lighter'
             const sPulse = 0.5 + 0.5 * Math.sin(t * 0.04 + c.id * 0.7)
             ctx.globalAlpha = (0.06 + sPulse * 0.04) * _orgGlowDamp
@@ -1500,7 +1816,7 @@ export function installCells(Renderer) {
             ctx.beginPath()
             ctx.arc(x, y, drawR + 2, 0, TAU)
             ctx.stroke()
-            ctx.restore()
+            ctx.globalCompositeOperation = 'source-over'
           }
 
           // ── Tracked cell highlight — covers whole organism ──
@@ -1514,12 +1830,9 @@ export function installCells(Renderer) {
             ctx.globalAlpha = 0.5 + pulse * 0.4
             ctx.strokeStyle = `rgba(255,220,60,${(0.6 + pulse * 0.4).toFixed(2)})`
             ctx.lineWidth = 2.0 + pulse * 1.5
-            ctx.setLineDash([4, 3])
-            ctx.lineDashOffset = -t * 0.5
             ctx.beginPath()
             ctx.arc(hlX, hlY, hlR + 6 + pulse * 3, 0, TAU)
             ctx.stroke()
-            ctx.setLineDash([])
             ctx.globalAlpha = 0.15 + pulse * 0.1
             ctx.strokeStyle = `rgba(255,220,60,0.4)`
             ctx.lineWidth = 6 + pulse * 3
@@ -1544,10 +1857,105 @@ export function installCells(Renderer) {
             ctx.restore()
           }
         }
-        if (filtered) ctx.globalAlpha = 1
       }
     }
 
+    // ── Flush batched LOD 0 dots ──
+    // Glow pass first (additive) — makes tiny dots visible against dark water
+    ctx.globalCompositeOperation = 'lighter'
+    for (let bi = 0; bi < _LOD0_BUCKETS; bi++) {
+      const b = _lod0Buckets[bi]
+      if (!b || b.pts.length === 0) continue
+      ctx.globalAlpha = 0.12
+      ctx.fillStyle = hsl(b.h, Math.min(100, b.s + 10), Math.min(85, b.l + 20))
+      ctx.beginPath()
+      const pts = b.pts
+      for (let j = 0; j < pts.length; j += 3) {
+        const px = pts[j],
+          py = pts[j + 1],
+          pr = pts[j + 2]
+        const gr = pr * 2.2
+        ctx.moveTo(px + gr, py)
+        ctx.arc(px, py, gr, 0, TAU)
+      }
+      ctx.fill()
+    }
+    // Core dot pass
+    ctx.globalCompositeOperation = 'source-over'
+    for (let bi = 0; bi < _LOD0_BUCKETS; bi++) {
+      const b = _lod0Buckets[bi]
+      if (!b || b.pts.length === 0) continue
+      ctx.globalAlpha = 0.85
+      ctx.fillStyle = hsl(b.h, b.s, b.l)
+      ctx.beginPath()
+      const pts = b.pts
+      for (let j = 0; j < pts.length; j += 3) {
+        const px = pts[j],
+          py = pts[j + 1],
+          pr = pts[j + 2]
+        ctx.moveTo(px + pr, py)
+        ctx.arc(px, py, pr, 0, TAU)
+      }
+      ctx.fill()
+    }
+    if (_lod0FilteredPath && _lod0FilteredPath.length > 0) {
+      ctx.globalAlpha = 0.06
+      ctx.fillStyle = 'rgba(120,130,150,0.5)'
+      ctx.beginPath()
+      const fp = _lod0FilteredPath
+      for (let j = 0; j < fp.length; j += 3) {
+        const px = fp[j],
+          py = fp[j + 1],
+          pr = fp[j + 2]
+        ctx.moveTo(px + pr, py)
+        ctx.arc(px, py, pr, 0, TAU)
+      }
+      ctx.fill()
+    }
+
+    // ── Flush batched LOD 1 circles (glow + fill + membrane stroke) ──
+    // Glow halo pass (additive) — makes organisms pop against dark water
+    ctx.globalCompositeOperation = 'lighter'
+    for (let bi = 0; bi < _LOD0_BUCKETS; bi++) {
+      const b = _lod1Buckets[bi]
+      if (!b || b.pts.length === 0) continue
+      ctx.globalAlpha = 0.08
+      ctx.fillStyle = hsl(b.h, Math.min(100, b.s + 10), Math.min(85, b.l + 25))
+      ctx.beginPath()
+      const pts = b.pts
+      for (let j = 0; j < pts.length; j += 3) {
+        const px = pts[j],
+          py = pts[j + 1],
+          pr = pts[j + 2]
+        const gr = pr * 2.0
+        ctx.moveTo(px + gr, py)
+        ctx.arc(px, py, gr, 0, TAU)
+      }
+      ctx.fill()
+    }
+    ctx.globalCompositeOperation = 'source-over'
+    for (let bi = 0; bi < _LOD0_BUCKETS; bi++) {
+      const b = _lod1Buckets[bi]
+      if (!b || b.pts.length === 0) continue
+      const pts = b.pts
+      // Fill pass
+      ctx.globalAlpha = 0.75
+      ctx.fillStyle = hsl(b.h, b.s, b.l)
+      ctx.beginPath()
+      for (let j = 0; j < pts.length; j += 3) {
+        const px = pts[j],
+          py = pts[j + 1],
+          pr = pts[j + 2]
+        ctx.moveTo(px + pr, py)
+        ctx.arc(px, py, pr, 0, TAU)
+      }
+      ctx.fill()
+      // Membrane stroke pass — brighter
+      ctx.globalAlpha = 0.6
+      ctx.strokeStyle = hsl(b.h, Math.min(100, b.s + 15), Math.min(88, b.l + 22))
+      ctx.lineWidth = 1.0
+      ctx.stroke()
+    }
     ctx.restore()
   }
 }

@@ -5,33 +5,38 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>EvoIO</title>
     <link rel="stylesheet" href="./style.css" />
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" defer></script>
   </head>
   <body>
     <div class="app">
       <div class="stage">
         <canvas id="view"></canvas>
 
-        <!-- Overlay slot zones for drag-drop panels -->
-        <div id="slot-tl" class="slot slot-tl">
-          <!-- HUD -->
-          <div class="dp" data-panel-id="hud">
-            <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Stats</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button></div>
+        <!-- Free-floating panels overlay — all widgets live here -->
+        <div id="panels-overlay">
+
+          <div class="dp" data-panel-id="hud" style="display:none">
+            <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Stats</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button><button class="dp-close" title="Remove widget">&times;</button></div>
             <div class="dp-body">
-              <div class="hud-row"><span class="hud-label">t</span><span id="hud-t" class="hud-value"></span></div>
+              <div class="hud-row"><span class="hud-label">tick</span><span id="hud-t" class="hud-value"></span></div>
+              <div class="hud-row"><span class="hud-label" id="hud-sun-icon">&#9728;</span><span id="hud-daynight" class="hud-value"></span></div>
               <div class="hud-row"><span class="hud-label">organisms</span><span id="hud-orgs" class="hud-value"></span></div>
               <div class="hud-row"><span class="hud-label">cells</span><span id="hud-pop" class="hud-value"></span></div>
-              <div class="hud-row"><span class="hud-label">links</span><span id="hud-links" class="hud-value"></span></div>
-              <div class="hud-row"><span class="hud-label">mean adhesion</span><span id="hud-adh" class="hud-value"></span></div>
-              <div class="hud-row"><span class="hud-label">mean speed</span><span id="hud-spd" class="hud-value"></span></div>
-              <div class="hud-row"><span class="hud-label">mean metabolism</span><span id="hud-met" class="hud-value"></span></div>
+              <div class="hud-row"><span class="hud-label">species</span><span id="hud-species" class="hud-value"></span></div>
+              <div class="hud-row"><span class="hud-label">multicell</span><span id="hud-multicell" class="hud-value"></span></div>
+              <div style="display:flex;gap:4px;margin:3px 0;font-size:8px">
+                <span style="color:#4ade80">&#9679; herb <span id="hud-herb" style="color:#c8d2e6">0</span></span>
+                <span style="color:#fbbf24">&#9679; omni <span id="hud-omni" style="color:#c8d2e6">0</span></span>
+                <span style="color:#f87171">&#9679; carn <span id="hud-carn" style="color:#c8d2e6">0</span></span>
+              </div>
+              <div class="hud-row"><span class="hud-label">kills</span><span id="hud-kills" class="hud-value"></span></div>
+              <div class="hud-row"><span class="hud-label">mean energy</span><span id="hud-energy" class="hud-value"></span></div>
+              <div class="hud-row"><span class="hud-label">biome</span><span id="hud-biome" class="hud-value"></span></div>
             </div>
           </div>
-        </div>
 
-        <div id="slot-ml" class="slot slot-ml">
-          <!-- Organelles -->
-          <div class="dp" data-panel-id="organelles">
-            <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Organelles</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button></div>
+          <div class="dp" data-panel-id="organelles" style="display:none">
+            <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Organelles</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button><button class="dp-close" title="Remove widget">&times;</button></div>
             <div class="dp-body">
               <div class="organelle-bars">
                 <div class="organelle-row"><span class="organelle-icon" style="color:#a855f7">&#9679;</span><span class="organelle-name">Nucleus</span><div class="organelle-bar-track"><div id="org-nucleus" class="organelle-bar-fill" style="background:#a855f7"></div></div><span id="org-nucleus-v" class="organelle-val">0%</span></div>
@@ -42,27 +47,10 @@
               </div>
             </div>
           </div>
-          <!-- Behavior -->
-          <div class="dp" data-panel-id="behavior">
-            <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Behavior</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button></div>
-            <div class="dp-body">
-              <div class="behavior-grid">
-                <div class="behavior-item"><span class="behavior-label">Bold</span><div class="bar-track"><div id="beh-bold" class="bar-fill" style="width:50%"></div></div><span id="beh-bold-v" class="behavior-val">0.50</span></div>
-                <div class="behavior-item"><span class="behavior-label">Social</span><div class="bar-track"><div id="beh-social" class="bar-fill" style="width:30%"></div></div><span id="beh-social-v" class="behavior-val">0.30</span></div>
-                <div class="behavior-item"><span class="behavior-label">MutR</span><div class="bar-track"><div id="beh-mutrate" class="bar-fill" style="width:20%"></div></div><span id="beh-mutrate-v" class="behavior-val">0.05</span></div>
-                <div class="behavior-item"><span class="behavior-label">Forage</span><div class="bar-track"><div id="beh-forage" class="bar-fill" style="width:0%"></div></div><span id="beh-forage-v" class="behavior-val">0.00</span></div>
-                <div class="behavior-item"><span class="behavior-label">Explr</span><div class="bar-track"><div id="beh-explore" class="bar-fill" style="width:0%"></div></div><span id="beh-explore-v" class="behavior-val">0.00</span></div>
-                <div class="behavior-item"><span class="behavior-label">Coop</span><div class="bar-track"><div id="beh-coop" class="bar-fill" style="width:0%"></div></div><span id="beh-coop-v" class="behavior-val">0.00</span></div>
-                <div class="behavior-item"><span class="behavior-label">Divers</span><div class="bar-track"><div id="beh-diversity" class="bar-fill" style="width:0%"></div></div><span id="beh-diversity-v" class="behavior-val">0</span></div>
-              </div>
-            </div>
-          </div>
-        </div>
 
-        <div id="slot-bl" class="slot slot-bl">
-          <!-- Status -->
-          <div class="dp" data-panel-id="status">
-            <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Status</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button></div>
+
+          <div class="dp" data-panel-id="status" style="display:none">
+            <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Status</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button><button class="dp-close" title="Remove widget">&times;</button></div>
             <div class="dp-body">
               <div class="ovl-row">
                 <span class="ovl-stat"><span class="ovl-lbl">Gen</span><span id="status-gen" class="ovl-val">0</span></span>
@@ -73,9 +61,9 @@
               </div>
             </div>
           </div>
-          <!-- Ecology -->
-          <div class="dp" data-panel-id="ecology">
-            <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Ecology</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button></div>
+
+          <div class="dp" data-panel-id="ecology" style="display:none">
+            <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Ecology</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button><button class="dp-close" title="Remove widget">&times;</button></div>
             <div class="dp-body">
               <div class="ovl-row">
                 <span class="ovl-tag eco-h"><span class="ovl-dot" style="background:#4ade80"></span>Herb <span id="eco-herb" class="ovl-val">0</span></span>
@@ -85,120 +73,247 @@
               </div>
             </div>
           </div>
-          <!-- Species -->
-          <div class="dp" data-panel-id="species">
-            <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Species</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button></div>
-            <div class="dp-body">
-              <div id="species-pop-list" class="species-list"></div>
-            </div>
-          </div>
-          <!-- Roles -->
-          <div class="dp" data-panel-id="roles">
-            <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Roles</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button></div>
-            <div class="dp-body">
-              <div class="ovl-row">
-                <span class="ovl-tag"><span class="ovl-dot" style="background:#8f9bb7"></span>Free <span id="role-none" class="ovl-val">0</span></span>
-                <span class="ovl-tag"><span class="ovl-dot" style="background:#a78bfa"></span>Edge <span id="role-edge" class="ovl-val">0</span></span>
-                <span class="ovl-tag"><span class="ovl-dot" style="background:#7c3aed"></span>Int <span id="role-interior" class="ovl-val">0</span></span>
-                <span class="ovl-tag"><span class="ovl-dot" style="background:#23d5ab"></span>Pio <span id="role-pioneer" class="ovl-val">0</span></span>
-              </div>
-              <div class="ovl-mc-row">
-                <span class="ovl-lbl">Multicell</span>
-                <div class="multicell-bar-track"><div id="multicell-bar" class="multicell-bar-fill"></div></div>
-                <span id="multicell-pct" class="multicell-pct">0%</span>
-              </div>
-            </div>
-          </div>
-        </div>
 
-        <div id="slot-tr" class="slot slot-tr">
-          <!-- Performance -->
-          <div class="dp" data-panel-id="performance">
-            <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Performance</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button></div>
+
+          <div class="dp" data-panel-id="performance" style="display:none">
+            <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Performance</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button><button class="dp-close" title="Remove widget">&times;</button></div>
             <div class="dp-body">
-              <div class="perf-row">
-                <span class="perf-label">FPS</span>
-                <div class="perf-bar-track"><div id="perf-fps-bar" class="perf-bar-fill perf-good"></div></div>
-                <span id="hud-fps" class="perf-val">60</span>
+              <div class="perf-row"><span class="perf-label">FPS</span><div class="perf-bar-track"><div id="perf-fps-bar" class="perf-bar-fill perf-good"></div></div><span id="hud-fps" class="perf-val">60</span></div>
+              <div class="perf-row"><span class="perf-label">Sim</span><div class="perf-bar-track"><div id="perf-sim-bar" class="perf-bar-fill perf-good"></div></div><span id="hud-simms" class="perf-val">0ms</span></div>
+              <div class="perf-row"><span class="perf-label">Render</span><div class="perf-bar-track"><div id="perf-render-bar" class="perf-bar-fill perf-good"></div></div><span id="hud-renderms" class="perf-val">0ms</span></div>
+              <div class="perf-row"><span class="perf-label">Frame</span><div class="perf-bar-track"><div id="perf-frame-bar" class="perf-bar-fill perf-good"></div></div><span id="perf-frame-v" class="perf-val">0ms</span></div>
+              <div class="perf-row"><span class="perf-label">Steps/s</span><div class="perf-bar-track"><div id="perf-steps-bar" class="perf-bar-fill perf-good"></div></div><span id="hud-stepss" class="perf-val">0</span></div>
+              <div class="perf-row"><span class="perf-label">Budget</span><div class="perf-bar-track"><div id="perf-budget-bar" class="perf-bar-fill perf-good"></div></div><span id="perf-budget-v" class="perf-val">0%</span></div>
+              <div style="margin-top:4px;border-top:1px solid rgba(255,255,255,0.06);padding-top:4px">
+                <div class="perf-row"><span class="perf-label">Cells</span><span id="perf-cells" class="perf-val">0</span></div>
+                <div class="perf-row"><span class="perf-label">Links</span><span id="perf-links" class="perf-val">0</span></div>
+                <div class="perf-row"><span class="perf-label">Species</span><span id="perf-species" class="perf-val">0</span></div>
+                <div class="perf-row"><span class="perf-label">&micro;s/cell</span><span id="perf-uscell" class="perf-val">0</span></div>
               </div>
-              <div class="perf-row">
-                <span class="perf-label">Sim</span>
-                <div class="perf-bar-track"><div id="perf-sim-bar" class="perf-bar-fill perf-good"></div></div>
-                <span id="hud-simms" class="perf-val">0ms</span>
+              <div style="margin-top:4px;border-top:1px solid rgba(255,255,255,0.06);padding-top:4px;font-size:7px;color:#8f9bb7;font-weight:600">Sim Subsystems</div>
+              <div id="perf-subsystems" style="font-size:7px;color:#c8d2e6"></div>
+              <div style="margin-top:4px;border-top:1px solid rgba(255,255,255,0.06);padding-top:4px;font-size:7px;color:#8f9bb7;font-weight:600">Render Subsystems</div>
+              <div id="perf-render-subs" style="font-size:7px;color:#c8d2e6"></div>
+            </div>
+          </div>
+
+          <div class="dp" data-panel-id="organisms" style="display:none">
+            <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Organisms</span><span class="org-count-controls"><button id="org-less" title="Show fewer" style="background:none;border:1px solid #3a4a5a;color:#8af;font:bold 13px monospace;width:20px;height:20px;cursor:pointer;border-radius:4px;line-height:1;padding:0">−</button><span id="org-count-label" style="color:#8af;font:10px monospace;margin:0 3px">3</span><button id="org-more" title="Show more" style="background:none;border:1px solid #3a4a5a;color:#8af;font:bold 13px monospace;width:20px;height:20px;cursor:pointer;border-radius:4px;line-height:1;padding:0">+</button></span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button><button class="dp-close" title="Remove widget">&times;</button></div>
+            <div class="dp-body">
+              <div id="organism-list" class="organism-list"><div class="organism-empty">No multicellular organisms yet</div></div>
+            </div>
+          </div>
+
+
+          <div class="dp" data-panel-id="graphs" style="display:none">
+            <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Evolution Over Time</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button><button class="dp-close" title="Remove widget">&times;</button></div>
+            <div class="dp-body">
+              <canvas id="graph-canvas" width="260" height="150" style="width:100%;height:150px;border-radius:4px;background:rgba(0,0,0,0.3)"></canvas>
+              <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
+                <label style="font-size:8px;color:#8f9bb7;cursor:pointer"><input type="radio" name="graph-metric" value="multicell" checked style="margin:0 2px"/>Multicell</label>
+                <label style="font-size:8px;color:#8f9bb7;cursor:pointer"><input type="radio" name="graph-metric" value="pop" style="margin:0 2px"/>Pop</label>
+                <label style="font-size:8px;color:#8f9bb7;cursor:pointer"><input type="radio" name="graph-metric" value="diversity" style="margin:0 2px"/>Diversity</label>
+                <label style="font-size:8px;color:#8f9bb7;cursor:pointer"><input type="radio" name="graph-metric" value="adhesion" style="margin:0 2px"/>Adhesion</label>
+                <label style="font-size:8px;color:#8f9bb7;cursor:pointer"><input type="radio" name="graph-metric" value="speed" style="margin:0 2px"/>Speed</label>
+                <label style="font-size:8px;color:#8f9bb7;cursor:pointer"><input type="radio" name="graph-metric" value="diet" style="margin:0 2px"/>Diet</label>
+                <label style="font-size:8px;color:#8f9bb7;cursor:pointer"><input type="radio" name="graph-metric" value="ecology" style="margin:0 2px"/>Ecology</label>
+                <label style="font-size:8px;color:#8f9bb7;cursor:pointer"><input type="radio" name="graph-metric" value="kills" style="margin:0 2px"/>Kills</label>
               </div>
-              <div class="perf-row">
-                <span class="perf-label">Render</span>
-                <div class="perf-bar-track"><div id="perf-render-bar" class="perf-bar-fill perf-good"></div></div>
-                <span id="hud-renderms" class="perf-val">0ms</span>
-              </div>
-              <div class="perf-row">
-                <span class="perf-label">Steps/s</span>
-                <div class="perf-bar-track"><div id="perf-steps-bar" class="perf-bar-fill perf-good"></div></div>
-                <span id="hud-stepss" class="perf-val">0</span>
-              </div>
-              <div class="perf-row">
-                <span class="perf-label">Budget</span>
-                <div class="perf-bar-track"><div id="perf-budget-bar" class="perf-bar-fill perf-good"></div></div>
-                <span id="perf-budget-v" class="perf-val">0%</span>
+              <div style="display:flex;gap:8px;align-items:center;margin-top:5px">
+                <span style="font-size:8px;color:#8f9bb7">Scale:</span>
+                <label style="font-size:8px;color:#8f9bb7;cursor:pointer"><input type="radio" name="graph-scale" value="true" checked style="margin:0 2px"/>True</label>
+                <label style="font-size:8px;color:#8f9bb7;cursor:pointer"><input type="radio" name="graph-scale" value="log" style="margin:0 2px"/>Log</label>
               </div>
             </div>
           </div>
-        </div>
 
-        <div id="slot-br" class="slot slot-br">
-          <!-- Mechanisms -->
-          <div class="dp" data-panel-id="mechanisms">
-            <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Mechanisms</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button></div>
+          <div class="dp" data-panel-id="science" style="display:none">
+            <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Science Tools</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button><button class="dp-close" title="Remove widget">&times;</button></div>
             <div class="dp-body">
-              <div class="mech-cols">
-                <div class="mech-col">
-                  <div class="mech-category">Movement</div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#4fc"></span><span class="mech-label">Flagella</span><div class="bar-track"><div id="mech-flagella" class="bar-fill" style="width:0%;background:#4fc"></div></div><span id="mech-flagella-v" class="mech-val">0%</span></div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#8cf"></span><span class="mech-label">Cilia</span><div class="bar-track"><div id="mech-cilia" class="bar-fill" style="width:0%;background:#8cf"></div></div><span id="mech-cilia-v" class="mech-val">0%</span></div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#6bf"></span><span class="mech-label">Jet</span><div class="bar-track"><div id="mech-jet" class="bar-fill" style="width:0%;background:#6bf"></div></div><span id="mech-jet-v" class="mech-val">0%</span></div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#ca8"></span><span class="mech-label">Amoeboid</span><div class="bar-track"><div id="mech-amoeboid" class="bar-fill" style="width:0%;background:#ca8"></div></div><span id="mech-amoeboid-v" class="mech-val">0%</span></div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#f9a"></span><span class="mech-label">Elongate</span><div class="bar-track"><div id="mech-elong" class="bar-fill" style="width:0%;background:#f9a"></div></div><span id="mech-elong-v" class="mech-val">0%</span></div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#8da"></span><span class="mech-label">Paddle</span><div class="bar-track"><div id="mech-paddle" class="bar-fill" style="width:0%;background:#8da"></div></div><span id="mech-paddle-v" class="mech-val">0%</span></div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#d8a"></span><span class="mech-label">Siphon</span><div class="bar-track"><div id="mech-proboscis" class="bar-fill" style="width:0%;background:#d8a"></div></div><span id="mech-proboscis-v" class="mech-val">0%</span></div>
-                </div>
-                <div class="mech-col">
-                  <div class="mech-category">Attack</div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#5f5"></span><span class="mech-label">Toxin</span><div class="bar-track"><div id="mech-toxin" class="bar-fill" style="width:0%;background:#5f5"></div></div><span id="mech-toxin-v" class="mech-val">0%</span></div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#f55"></span><span class="mech-label">Spike</span><div class="bar-track"><div id="mech-spike" class="bar-fill" style="width:0%;background:#f55"></div></div><span id="mech-spike-v" class="mech-val">0%</span></div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#c6f"></span><span class="mech-label">Constrict</span><div class="bar-track"><div id="mech-constrict" class="bar-fill" style="width:0%;background:#c6f"></div></div><span id="mech-constrict-v" class="mech-val">0%</span></div>
-                </div>
-                <div class="mech-col">
-                  <div class="mech-category">Defense</div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#aaa"></span><span class="mech-label">Membrane</span><div class="bar-track"><div id="mech-membrane" class="bar-fill" style="width:0%;background:#aaa"></div></div><span id="mech-membrane-v" class="mech-val">0%</span></div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#da5"></span><span class="mech-label">Spines</span><div class="bar-track"><div id="mech-spines" class="bar-fill" style="width:0%;background:#da5"></div></div><span id="mech-spines-v" class="mech-val">0%</span></div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#888"></span><span class="mech-label">Camo</span><div class="bar-track"><div id="mech-camo" class="bar-fill" style="width:0%;background:#888"></div></div><span id="mech-camo-v" class="mech-val">0%</span></div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#5a5"></span><span class="mech-label">ToxRes</span><div class="bar-track"><div id="mech-toxresist" class="bar-fill" style="width:0%;background:#5a5"></div></div><span id="mech-toxresist-v" class="mech-val">0%</span></div>
-                  <div class="mech-category">Morphology</div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#60a5fa"></span><span class="mech-label">Flipper</span><div class="bar-track"><div id="morph-flipper" class="bar-fill" style="width:0%;background:#60a5fa"></div></div><span id="morph-flipper-v" class="mech-val">0%</span></div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#a78bfa"></span><span class="mech-label">Membr</span><div class="bar-track"><div id="morph-membrane" class="bar-fill" style="width:0%;background:#a78bfa"></div></div><span id="morph-membrane-v" class="mech-val">0%</span></div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#34d399"></span><span class="mech-label">Cilia</span><div class="bar-track"><div id="morph-cilia" class="bar-fill" style="width:0%;background:#34d399"></div></div><span id="morph-cilia-v" class="mech-val">0%</span></div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#fb923c"></span><span class="mech-label">Spines</span><div class="bar-track"><div id="morph-spines" class="bar-fill" style="width:0%;background:#fb923c"></div></div><span id="morph-spines-v" class="mech-val">0%</span></div>
-                  <div class="mech-category">Special</div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#7ff"></span><span class="mech-label">Biolum</span><div class="bar-track"><div id="mech-biolum" class="bar-fill" style="width:0%;background:#7ff"></div></div><span id="mech-biolum-v" class="mech-val">0%</span></div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#fa7"></span><span class="mech-label">Vesicles</span><div class="bar-track"><div id="mech-vesicles" class="bar-fill" style="width:0%;background:#fa7"></div></div><span id="mech-vesicles-v" class="mech-val">0%</span></div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#ff8"></span><span class="mech-label">Bright</span><div class="bar-track"><div id="mech-bright" class="bar-fill" style="width:0%;background:#ff8"></div></div><span id="mech-bright-v" class="mech-val">0%</span></div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#f6c"></span><span class="mech-label">Sexual</span><div class="bar-track"><div id="mech-sexuality" class="bar-fill" style="width:0%;background:#f6c"></div></div><span id="mech-sexuality-v" class="mech-val">0%</span></div>
-                  <div class="mech-category">Adaptations</div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#c9b"></span><span class="mech-label">Shell</span><div class="bar-track"><div id="mech-shell" class="bar-fill" style="width:0%;background:#c9b"></div></div><span id="mech-shell-v" class="mech-val">0%</span></div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#fd5"></span><span class="mech-label">Symbio</span><div class="bar-track"><div id="mech-symbiosis" class="bar-fill" style="width:0%;background:#fd5"></div></div><span id="mech-symbiosis-v" class="mech-val">0%</span></div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#e44"></span><span class="mech-label">Stigma</span><div class="bar-track"><div id="mech-eyespot" class="bar-fill" style="width:0%;background:#e44"></div></div><span id="mech-eyespot-v" class="mech-val">0%</span></div>
-                  <div class="mech-item"><span class="mech-dot" style="background:#8b6"></span><span class="mech-label">Stalk</span><div class="bar-track"><div id="mech-stalk" class="bar-fill" style="width:0%;background:#8b6"></div></div><span id="mech-stalk-v" class="mech-val">0%</span></div>
+              <div style="font-size:8px;color:#8f9bb7;margin-bottom:4px;font-weight:600">Data Export</div>
+              <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:6px">
+                <button id="btn-export-csv" class="btn" title="Export time-series stats as CSV" style="font-size:9px;padding:3px 6px">CSV Stats</button>
+                <button id="btn-export-cells" class="btn" title="Export all cells with genomes as CSV" style="font-size:9px;padding:3px 6px">Cells CSV</button>
+                <button id="btn-export-newick" class="btn" title="Export phylogenetic tree as Newick" style="font-size:9px;padding:3px 6px">Newick Tree</button>
+                <button id="btn-export-alleles" class="btn" title="Export allele frequency time-series" style="font-size:9px;padding:3px 6px">Alleles CSV</button>
+                <button id="btn-export-muller" class="btn" title="Export Muller plot data as CSV" style="font-size:9px;padding:3px 6px">Muller CSV</button>
+                <button id="btn-export-log" class="btn" title="Export experiment log" style="font-size:9px;padding:3px 6px">Exp Log</button>
+                <button id="btn-export-pokedex" class="btn" title="Export Pokédex-style organism cards as ZIP" style="font-size:9px;padding:3px 6px;background:rgba(124,92,255,0.15);border-color:rgba(124,92,255,0.3)">Pokédex</button>
+              </div>
+              <div style="font-size:8px;color:#8f9bb7;margin-bottom:4px;font-weight:600">Population Genetics</div>
+              <div class="popgen-stats" style="font-size:8px;color:#c8d2e6;margin-bottom:4px">
+                <div class="hud-row"><span class="hud-label">Ne</span><span id="pg-ne" class="hud-value">-</span></div>
+                <div class="hud-row"><span class="hud-label">He</span><span id="pg-he" class="hud-value">-</span></div>
+                <div class="hud-row"><span class="hud-label">Fst</span><span id="pg-fst" class="hud-value">-</span></div>
+                <div class="hud-row"><span class="hud-label">&pi;</span><span id="pg-pi" class="hud-value">-</span></div>
+                <div class="hud-row"><span class="hud-label">H'</span><span id="pg-shannon" class="hud-value">-</span></div>
+                <div class="hud-row"><span class="hud-label">Fit &sigma;</span><span id="pg-fitsd" class="hud-value">-</span></div>
+                <div class="hud-row"><span class="hud-label">Gen time</span><span id="pg-gentime" class="hud-value">-</span></div>
+              </div>
+              <canvas id="popgen-canvas" width="260" height="120" style="width:100%;height:120px;border-radius:4px;background:rgba(0,0,0,0.3)"></canvas>
+              <div style="font-size:8px;color:#8f9bb7;margin-top:6px;margin-bottom:4px;font-weight:600">Gene Knockouts</div>
+              <div id="knockout-controls" style="font-size:8px;max-height:140px;overflow-y:auto">
+                <div class="ko-row"><label><input type="checkbox" data-ko="speed"/> speed</label></div>
+                <div class="ko-row"><label><input type="checkbox" data-ko="adhesion"/> adhesion</label></div>
+                <div class="ko-row"><label><input type="checkbox" data-ko="diet"/> diet</label></div>
+                <div class="ko-row"><label><input type="checkbox" data-ko="flagella"/> flagella</label></div>
+                <div class="ko-row"><label><input type="checkbox" data-ko="cilia"/> cilia</label></div>
+                <div class="ko-row"><label><input type="checkbox" data-ko="toxin"/> toxin</label></div>
+                <div class="ko-row"><label><input type="checkbox" data-ko="spike"/> spike</label></div>
+                <div class="ko-row"><label><input type="checkbox" data-ko="membrane"/> membrane</label></div>
+                <div class="ko-row"><label><input type="checkbox" data-ko="shell"/> shell</label></div>
+                <div class="ko-row"><label><input type="checkbox" data-ko="chloroplast"/> chloroplast</label></div>
+                <div class="ko-row"><label><input type="checkbox" data-ko="sexuality"/> sexuality</label></div>
+                <div class="ko-row"><label><input type="checkbox" data-ko="elongation"/> elongation</label></div>
+                <div class="ko-row"><label><input type="checkbox" data-ko="eyespot"/> eyespot</label></div>
+                <div class="ko-row"><label><input type="checkbox" data-ko="sociality"/> sociality</label></div>
+                <div class="ko-row"><label><input type="checkbox" data-ko="boldness"/> boldness</label></div>
+              </div>
+              <div style="font-size:7px;color:#556;margin-top:2px">Check = knockout (force gene to 0 for all offspring)</div>
+            </div>
+          </div>
+
+          <div class="dp" data-panel-id="muller" style="display:none">
+            <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Muller Plot</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button><button class="dp-close" title="Remove widget">&times;</button></div>
+            <div class="dp-body">
+              <canvas id="muller-canvas" width="260" height="150" style="width:100%;height:150px;border-radius:4px;background:rgba(0,0,0,0.3)"></canvas>
+              <div style="font-size:7px;color:#667;margin-top:2px;text-align:center">Clade frequency over time (stacked)</div>
+            </div>
+          </div>
+
+          <div class="dp" data-panel-id="genomebrowser" style="display:none">
+            <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Genome Browser</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button><button class="dp-close" title="Remove widget">&times;</button></div>
+            <div class="dp-body">
+              <div style="font-size:8px;color:#8f9bb7;margin-bottom:4px">Click a cell on the canvas to inspect its DNA</div>
+              <div id="genome-info" style="font-size:8px;color:#c8d2e6;margin-bottom:4px">
+                <div id="genome-cell-info" style="color:#667">No cell selected</div>
+              </div>
+              <canvas id="genome-canvas" width="260" height="80" style="width:100%;height:80px;border-radius:4px;background:rgba(0,0,0,0.3)"></canvas>
+              <div id="genome-genes" style="font-size:7px;color:#c8d2e6;margin-top:4px;max-height:120px;overflow-y:auto"></div>
+              <div style="display:flex;gap:4px;margin-top:4px">
+                <button id="btn-export-genome" class="btn" title="Export selected cell genome as JSON" style="font-size:9px;padding:3px 6px">Export Genome</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="dp" data-panel-id="experiment" style="display:none">
+            <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Experiment Controls</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button><button class="dp-close" title="Remove widget">&times;</button></div>
+            <div class="dp-body">
+              <div style="font-size:8px;color:#8f9bb7;margin-bottom:4px;font-weight:600">Selection Coefficients</div>
+              <div id="selection-panel" style="font-size:7px;color:#c8d2e6;margin-bottom:6px;max-height:120px;overflow-y:auto">
+                <div style="color:#667">Collecting data...</div>
+              </div>
+              <div style="display:flex;gap:4px;margin-bottom:8px">
+                <button id="btn-export-selection" class="btn" title="Export selection coefficients" style="font-size:9px;padding:3px 6px">Selection CSV</button>
+              </div>
+
+              <div style="font-size:8px;color:#8f9bb7;margin-bottom:4px;font-weight:600">Inject Organism</div>
+              <div style="font-size:7px;color:#667;margin-bottom:3px">Place a custom cell at the world center</div>
+              <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:4px">
+                <button id="btn-inject-random" class="btn" title="Inject a random organism" style="font-size:9px;padding:3px 6px">Random</button>
+                <button id="btn-inject-clone" class="btn" title="Clone the selected cell" style="font-size:9px;padding:3px 6px">Clone Selected</button>
+                <button id="btn-inject-predator" class="btn" title="Inject a predator-optimized cell" style="font-size:9px;padding:3px 6px">Predator</button>
+                <button id="btn-inject-phototroph" class="btn" title="Inject a photosynthesis-optimized cell" style="font-size:9px;padding:3px 6px">Phototroph</button>
+              </div>
+
+              <div style="font-size:8px;color:#8f9bb7;margin-bottom:4px;font-weight:600">Population Start</div>
+              <label style="font-size:8px;color:#c8d2e6;display:flex;align-items:center;gap:4px;margin-bottom:6px">
+                <input id="clonal-start" type="checkbox" style="margin:0;width:12px;height:12px" />
+                Clonal start (all identical genomes on next reset)
+              </label>
+
+              <div style="font-size:8px;color:#8f9bb7;margin-bottom:4px;font-weight:600">Environment Script</div>
+              <div style="font-size:7px;color:#667;margin-bottom:3px">One command per line. Format: tick action [args]</div>
+              <textarea id="env-script" rows="5" style="width:100%;font-size:8px;font-family:monospace;background:rgba(0,0,0,0.3);color:#c8d2e6;border:1px solid rgba(255,255,255,0.1);border-radius:4px;padding:4px;resize:vertical" placeholder="# Examples:
+1000 set_food 0.5
+2000 knockout toxin
+3000 restore_gene toxin
+every 500 log_snapshot"></textarea>
+              <div style="display:flex;gap:4px;margin-top:4px;margin-bottom:8px">
+                <button id="btn-script-run" class="btn" style="font-size:9px;padding:3px 6px">Load Script</button>
+                <button id="btn-script-clear" class="btn" style="font-size:9px;padding:3px 6px">Clear</button>
+              </div>
+              <div id="script-status" style="font-size:7px;color:#667"></div>
+
+              <div style="font-size:8px;color:#8f9bb7;margin-bottom:4px;font-weight:600">A/B Split World</div>
+              <label style="font-size:8px;color:#c8d2e6;display:flex;align-items:center;gap:4px;margin-bottom:4px">
+                <input id="split-active" type="checkbox" style="margin:0;width:12px;height:12px" />
+                Enable split (left/right halves)
+              </label>
+              <label style="font-size:8px;color:#c8d2e6;display:flex;align-items:center;gap:4px;margin-bottom:4px">
+                <input id="split-barrier" type="checkbox" checked style="margin:0;width:12px;height:12px" />
+                Migration barrier
+              </label>
+              <div style="font-size:7px;color:#667;margin-bottom:3px">Side B multipliers (side A = defaults):</div>
+              <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px">
+                <label style="font-size:7px;color:#aab">Food <input id="split-food" type="number" min="0.1" max="5" step="0.1" value="1.0" style="width:40px;font-size:8px;background:rgba(0,0,0,0.3);color:#c8d2e6;border:1px solid rgba(255,255,255,0.1);border-radius:3px;padding:1px 3px" /></label>
+                <label style="font-size:7px;color:#aab">Mut <input id="split-mutation" type="number" min="0.1" max="5" step="0.1" value="1.0" style="width:40px;font-size:8px;background:rgba(0,0,0,0.3);color:#c8d2e6;border:1px solid rgba(255,255,255,0.1);border-radius:3px;padding:1px 3px" /></label>
+                <label style="font-size:7px;color:#aab">Metab <input id="split-metab" type="number" min="0.1" max="5" step="0.1" value="1.0" style="width:40px;font-size:8px;background:rgba(0,0,0,0.3);color:#c8d2e6;border:1px solid rgba(255,255,255,0.1);border-radius:3px;padding:1px 3px" /></label>
+              </div>
+              <canvas id="split-canvas" width="260" height="100" style="width:100%;height:100px;border-radius:4px;background:rgba(0,0,0,0.3)"></canvas>
+              <div id="split-stats" style="font-size:7px;color:#667;margin-top:2px;text-align:center">Enable split to track divergence</div>
+            </div>
+          </div>
+
+          <div class="dp" data-panel-id="stresstest" style="display:none">
+            <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Stress Test</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button><button class="dp-close" title="Remove widget">&times;</button></div>
+            <div class="dp-body">
+              <div style="font-size:8px;color:#8f9bb7;margin-bottom:4px">Auto-ramp params &amp; monitor performance</div>
+              <div style="display:flex;gap:4px;margin-bottom:6px">
+                <button id="btn-stress-start" class="btn" style="font-size:9px;padding:3px 8px">&#9654; Start</button>
+                <button id="btn-stress-stop" class="btn" style="font-size:9px;padding:3px 8px" disabled>&#9724; Stop</button>
+                <button id="btn-stress-export" class="btn" style="font-size:9px;padding:3px 8px" disabled>Export CSV</button>
+              </div>
+              <div id="stress-summary" style="font-size:8px;color:#c8d2e6;margin-bottom:4px">
+                <div style="color:#667;font-size:8px">Press Start to begin stress test</div>
+              </div>
+              <canvas id="stress-canvas" width="260" height="140" style="width:100%;height:140px;border-radius:4px;background:rgba(0,0,0,0.3)"></canvas>
+              <div style="font-size:7px;color:#667;margin-top:2px;text-align:center">FPS &amp; population vs parameter ramp</div>
+            </div>
+          </div>
+
+          <div class="dp" data-panel-id="settings" style="display:none">
+            <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Settings</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button><button class="dp-close" title="Remove widget">&times;</button></div>
+            <div class="dp-body">
+              <div class="row"><button id="btn-copylink" class="btn">Copy link</button></div>
+              <div class="row"><label class="label">Preset</label><select id="preset" class="select"><option value="patchy">Patchy (multicell)</option><option value="uniform">Uniform (speed)</option><option value="harsh">Harsh (boom/bust)</option></select></div>
+              <div class="row"><label class="label">Speed</label><div class="control"><input id="speed" type="number" min="1" step="1" value="60" class="input" /><div class="hint"><span id="speed-v"></span> steps/frame</div></div></div>
+              <div class="row"><label class="label">Mutation</label><div class="control"><input id="mutation" type="number" min="0" step="0.005" value="0.06" class="input" /></div></div>
+              <div class="row"><label class="label">Food</label><div class="control"><input id="food" type="number" min="0" step="0.01" value="1.2" class="input" /></div></div>
+              <div class="row"><label class="label">Patchiness</label><div class="control"><input id="patch" type="number" min="0" max="1" step="0.01" value="0.75" class="input" /></div></div>
+              <div class="row"><label class="label">Max organisms</label><div class="control"><input id="maxOrganisms" type="number" min="1" step="50" value="1200" class="input" /></div></div>
+              <div class="row"><label class="label">World size</label><div class="control"><input id="worldSize" type="number" min="100" step="20" value="1920" class="input" /></div></div>
+              <div class="row"><label class="label">Blob weird</label><div class="control"><input id="blobWeird" type="number" min="0" max="100" step="1" value="30" class="input" /></div></div>
+              <div class="row"><label class="checkbox"><input id="showFood" type="checkbox" checked /><span>Food</span></label><label class="checkbox"><input id="showLinks" type="checkbox" checked /><span>Links</span></label></div>
+              <div class="row"><label class="label">Camera</label><select id="cameraMode" class="select"><option value="free" selected>Free</option><option value="auto">Auto</option><option value="track">Track Best</option><option value="random">Random Tour</option><option value="predator">Predator Cam</option><option value="herbivore">Herbivore Cam</option><option value="largest">Largest Organism</option><option value="battle">Battle Cam</option><option value="pioneer">Pioneer Cam</option><option value="newborn">Newborn Cam</option></select></div>
+              <div class="row"><label class="label">Diet</label><select id="filterDiet" class="select"><option value="all">All</option><option value="herb">Herbivore</option><option value="omni">Omnivore</option><option value="carn">Carnivore</option></select></div>
+              <div class="row"><label class="label">Role</label><select id="filterRole" class="select"><option value="all">All</option><option value="none">Free</option><option value="edge">Edge</option><option value="interior">Interior</option><option value="pioneer">Pioneer</option></select></div>
+              <div class="row"><label class="label">Species</label><select id="filterSpecies" class="select"><option value="all">All species</option></select></div>
+              <div class="row"><label class="label">Seed</label><input id="seed" class="input" /></div>
+              <div class="lofi-section">
+                <div class="row"><label class="checkbox lofi-master"><input id="lofiEnabled" type="checkbox" /><span>Low Fidelity Mode</span></label></div>
+                <div id="lofi-options" class="lofi-options">
+                  <label class="checkbox lofi-opt"><input id="lofiWater" type="checkbox" checked /><span>Water BG</span></label>
+                  <label class="checkbox lofi-opt"><input id="lofiFoodOverlay" type="checkbox" checked /><span>Food overlay</span></label>
+                  <label class="checkbox lofi-opt"><input id="lofiFoodBuds" type="checkbox" checked /><span>Food buds</span></label>
+                  <label class="checkbox lofi-opt"><input id="lofiTerrain" type="checkbox" checked /><span>Terrain</span></label>
+                  <label class="checkbox lofi-opt"><input id="lofiTrails" type="checkbox" checked /><span>Trails</span></label>
+                  <label class="checkbox lofi-opt"><input id="lofiHulls" type="checkbox" checked /><span>Hulls</span></label>
+                  <label class="checkbox lofi-opt"><input id="lofiParticles" type="checkbox" checked /><span>Particles</span></label>
+                  <label class="checkbox lofi-opt"><input id="lofiMorphology" type="checkbox" checked /><span>Morphology</span></label>
+                  <label class="checkbox lofi-opt"><input id="lofiOrganelles" type="checkbox" checked /><span>Organelles</span></label>
+                  <label class="checkbox lofi-opt"><input id="lofiGlow" type="checkbox" checked /><span>Glow/FX</span></label>
                 </div>
               </div>
             </div>
           </div>
-        </div>
 
-        <div id="slot-mr" class="slot slot-mr"></div>
+        </div>
       </div>
 
-      <aside class="panel">
-       <div class="panel-inner" id="slot-sidebar">
+      <aside class="panel" id="sidebar-panel">
+       <div class="panel-resize-handle" id="panel-resize"></div>
+       <div class="panel-inner">
         <div class="panel-header">
           <div class="title">EvoIO</div>
           <div class="row" style="margin-top:6px;margin-bottom:0">
@@ -208,8 +323,8 @@
             <button id="btn-reroll" class="btn">Reroll</button>
           </div>
           <div class="row" style="margin-top:4px;margin-bottom:0;gap:4px">
-            <button id="btn-save" class="btn" title="Save simulation state to file">💾 Save</button>
-            <button id="btn-import" class="btn" title="Import a saved simulation">📂 Import</button>
+            <button id="btn-save" class="btn" title="Save simulation state to file">&#128190; Save</button>
+            <button id="btn-import" class="btn" title="Import a saved simulation">&#128194; Import</button>
             <input id="import-file" type="file" accept=".json" style="display:none" />
           </div>
           <div class="row" style="margin-top:4px;margin-bottom:0;gap:4px">
@@ -218,172 +333,16 @@
             <span style="font-size:9px;color:#8f9bb7">ticks</span>
           </div>
         </div>
-
-        <!-- Organisms -->
-        <div class="dp" data-panel-id="organisms">
-          <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Organisms</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button></div>
-          <div class="dp-body">
-            <div id="organism-list" class="organism-list">
-              <div class="organism-empty">No multicellular organisms yet</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Largest Organisms -->
-        <div class="dp" data-panel-id="largest">
-          <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Largest Organisms</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button></div>
-          <div class="dp-body">
-            <div id="largest-list" class="largest-list">
-              <div class="organism-empty">No organisms yet</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Longest Species -->
-        <div class="dp" data-panel-id="species">
-          <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Longest Species</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button></div>
-          <div class="dp-body">
-            <div id="species-list" class="species-list">
-              <div class="organism-empty">Tracking species...</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Food Chain -->
-        <div class="dp" data-panel-id="foodchain">
-          <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Food Chain</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button></div>
-          <div class="dp-body">
-            <div id="foodchain-list" class="foodchain-list">
-              <div class="organism-empty">No predation yet</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Evolution Graphs -->
-        <div class="dp" data-panel-id="graphs">
-          <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Evolution Over Time</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button></div>
-          <div class="dp-body">
-            <canvas id="graph-canvas" width="260" height="150" style="width:100%;height:150px;border-radius:4px;background:rgba(0,0,0,0.3)"></canvas>
-            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
-              <label style="font-size:8px;color:#8f9bb7;cursor:pointer"><input type="radio" name="graph-metric" value="multicell" checked style="margin:0 2px"/>Multicell</label>
-              <label style="font-size:8px;color:#8f9bb7;cursor:pointer"><input type="radio" name="graph-metric" value="pop" style="margin:0 2px"/>Pop</label>
-              <label style="font-size:8px;color:#8f9bb7;cursor:pointer"><input type="radio" name="graph-metric" value="diversity" style="margin:0 2px"/>Diversity</label>
-              <label style="font-size:8px;color:#8f9bb7;cursor:pointer"><input type="radio" name="graph-metric" value="adhesion" style="margin:0 2px"/>Adhesion</label>
-              <label style="font-size:8px;color:#8f9bb7;cursor:pointer"><input type="radio" name="graph-metric" value="speed" style="margin:0 2px"/>Speed</label>
-              <label style="font-size:8px;color:#8f9bb7;cursor:pointer"><input type="radio" name="graph-metric" value="diet" style="margin:0 2px"/>Diet</label>
-              <label style="font-size:8px;color:#8f9bb7;cursor:pointer"><input type="radio" name="graph-metric" value="ecology" style="margin:0 2px"/>Ecology</label>
-              <label style="font-size:8px;color:#8f9bb7;cursor:pointer"><input type="radio" name="graph-metric" value="kills" style="margin:0 2px"/>Kills</label>
-            </div>
-          </div>
-        </div>
-
-        <!-- Settings (visible by default) -->
-        <div class="dp" data-panel-id="settings">
-          <div class="dp-header"><span class="dp-grip">&#9776;</span><span class="dp-title">Settings</span><button class="dp-collapse"><span class="dp-arrow">&#9660;</span></button></div>
-          <div class="dp-body">
-            <div class="row">
-              <button id="btn-copylink" class="btn">Copy link</button>
-            </div>
-            <div class="row">
-              <label class="label">Preset</label>
-              <select id="preset" class="select">
-                <option value="patchy">Patchy (multicell)</option>
-                <option value="uniform">Uniform (speed)</option>
-                <option value="harsh">Harsh (boom/bust)</option>
-              </select>
-            </div>
-            <div class="row">
-              <label class="label">Speed</label>
-              <div class="control">
-                <input id="speed" type="number" min="1" step="1" value="60" class="input" />
-                <div class="hint"><span id="speed-v"></span> steps/frame</div>
-              </div>
-            </div>
-            <div class="row">
-              <label class="label">Mutation</label>
-              <div class="control">
-                <input id="mutation" type="number" min="0" step="0.005" value="0.06" class="input" />
-              </div>
-            </div>
-            <div class="row">
-              <label class="label">Food</label>
-              <div class="control">
-                <input id="food" type="number" min="0" step="0.01" value="1.2" class="input" />
-              </div>
-            </div>
-            <div class="row">
-              <label class="label">Patchiness</label>
-              <div class="control">
-                <input id="patch" type="number" min="0" max="1" step="0.01" value="0.75" class="input" />
-              </div>
-            </div>
-            <div class="row">
-              <label class="label">Max organisms</label>
-              <div class="control">
-                <input id="maxOrganisms" type="number" min="1" step="50" value="1200" class="input" />
-              </div>
-            </div>
-            <div class="row">
-              <label class="label">World size</label>
-              <div class="control">
-                <input id="worldSize" type="number" min="100" step="20" value="1920" class="input" />
-              </div>
-            </div>
-            <div class="row">
-              <label class="label">Blob weird</label>
-              <div class="control">
-                <input id="blobWeird" type="number" min="0" max="100" step="1" value="30" class="input" />
-              </div>
-            </div>
-            <div class="row">
-              <label class="checkbox"><input id="showFood" type="checkbox" checked /><span>Food</span></label>
-              <label class="checkbox"><input id="showLinks" type="checkbox" checked /><span>Links</span></label>
-            </div>
-            <div class="row">
-              <label class="label">Camera</label>
-              <select id="cameraMode" class="select">
-                <option value="free" selected>Free</option>
-                <option value="auto">Auto</option>
-                <option value="track">Track</option>
-                <option value="random">Random</option>
-              </select>
-            </div>
-            <div class="row">
-              <label class="label">Diet</label>
-              <select id="filterDiet" class="select">
-                <option value="all">All</option>
-                <option value="herb">Herb</option>
-                <option value="omni">Omni</option>
-                <option value="carn">Carn</option>
-              </select>
-            </div>
-            <div class="row">
-              <label class="label">Role</label>
-              <select id="filterRole" class="select">
-                <option value="all">All</option>
-                <option value="none">Free</option>
-                <option value="edge">Edge</option>
-                <option value="interior">Interior</option>
-                <option value="pioneer">Pioneer</option>
-              </select>
-            </div>
-            <div class="row">
-              <label class="label">Species</label>
-              <select id="filterSpecies" class="select">
-                <option value="all">All species</option>
-              </select>
-            </div>
-            <div class="row">
-              <label class="label">Seed</label>
-              <input id="seed" class="input" />
-            </div>
-          </div>
-        </div>
-
+        <div id="widget-toggles" class="widget-toggles"></div>
        </div>
       </aside>
     </div>
 
+    <script>
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/sw.js').catch(() => {})
+      }
+    </script>
     <script type="module" src="./src/main.js"></script>
   </body>
 </html>

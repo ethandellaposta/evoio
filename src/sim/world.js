@@ -257,6 +257,38 @@ export function installWorld(Sim) {
         y: cy + Math.sin(a) * r
       })
     }
+    this._buildBlobMask()
+  }
+
+  // Precompute a pixel mask of the blob interior (1 = inside, 0 = outside).
+  // Used to gate food/mineral/meat growth so resources don't accumulate
+  // outside the blob and diffuse inward, causing edge-bunching.
+  P._buildBlobMask = function () {
+    const w = this.w,
+      h = this.h
+    // Downsample by 4x to avoid expensive per-pixel isInsideBlob calls
+    const ds = 4
+    const dsw = Math.ceil(w / ds)
+    const dsh = Math.ceil(h / ds)
+    const dsMask = new Uint8Array(dsw * dsh)
+    for (let dy = 0; dy < dsh; dy++) {
+      const wy = dy * ds + ds * 0.5
+      for (let dx = 0; dx < dsw; dx++) {
+        const wx = dx * ds + ds * 0.5
+        dsMask[dx + dy * dsw] = this.isInsideBlob(wx, wy) ? 1 : 0
+      }
+    }
+    // Upscale to full resolution — a pixel is inside if its downsample cell is inside
+    this.blobMask = new Uint8Array(w * h)
+    for (let iy = 0; iy < h; iy++) {
+      const diy = Math.min(dsh - 1, (iy / ds) | 0)
+      const rowOff = iy * w
+      const dsRowOff = diy * dsw
+      for (let ix = 0; ix < w; ix++) {
+        const dix = Math.min(dsw - 1, (ix / ds) | 0)
+        this.blobMask[ix + rowOff] = dsMask[dix + dsRowOff]
+      }
+    }
   }
 
   // Elliptical blob radius at angle with harmonic perturbation
@@ -285,12 +317,207 @@ export function installWorld(Sim) {
     return dist < this._blobRadiusAt(angle)
   }
 
-  // Biome index is simply based on x-position (left=0, middle=1, right=2)
+  // Biome index is simply based on x-position (left=0, middle=1, right=2, ...)
   P.getBiomeAt = function (x, _y) {
     const biomes = this.cfg.biomes
     if (!biomes || biomes.length === 0) return 0
     const regionW = this.w / biomes.length
     return Math.min(biomes.length - 1, (x / regionW) | 0)
+  }
+
+  // Get biome config object at world position
+  P.getBiomeConfigAt = function (x, y) {
+    const biomes = this.cfg.biomes
+    if (!biomes || biomes.length === 0) return null
+    return biomes[this.getBiomeAt(x, y)]
+  }
+
+  // ── Shelter grid helpers ──
+  P._shelterIdx = function (x, y) {
+    const ix = Math.max(0, Math.min(this.shelterW - 1, (x / 4) | 0))
+    const iy = Math.max(0, Math.min(this.shelterH - 1, (y / 4) | 0))
+    return ix + iy * this.shelterW
+  }
+
+  P.sampleShelter = function (x, y) {
+    return this.shelterGrid[this._shelterIdx(x, y)]
+  }
+
+  P.depositShelter = function (x, y, amount) {
+    const bi = this.getBiomeAt(x, y)
+    const biome = this.cfg.biomes && this.cfg.biomes[bi]
+    const cap = biome ? biome.shelterCap || 2.0 : 2.0
+    const idx = this._shelterIdx(x, y)
+    this.shelterGrid[idx] = Math.min(cap, this.shelterGrid[idx] + amount)
+  }
+
+  // Slow biome-driven shelter growth + decay
+  P._growShelter = function () {
+    const biomes = this.cfg.biomes
+    if (!biomes || biomes.length === 0) return
+    const sw = this.shelterW,
+      sh = this.shelterH
+    const grid = this.shelterGrid
+    const nb = biomes.length
+    const regionW = this.w / nb
+    // Process a fraction each tick for performance
+    const stride = 8
+    const offset = this.t % stride
+    for (let i = offset; i < sw * sh; i += stride) {
+      const wx = (i % sw) * 4
+      const bi = Math.min(nb - 1, (wx / regionW) | 0)
+      const biome = biomes[bi]
+      const rate = (biome.shelterRate || 0.5) * 0.00002
+      const cap = biome.shelterCap || 2.0
+      // Slow biome-driven growth (coral reefs build structure, kelp holdfasts grow)
+      if (grid[i] < cap) {
+        grid[i] += rate * stride
+      }
+      // Slow decay — structures erode over time
+      grid[i] *= 1 - 0.00001 * stride
+      if (grid[i] < 0.001) grid[i] = 0
+    }
+  }
+
+  // ── Alarm pheromone grid helpers ──
+  // Uses same index as shelter grid (1/4 resolution)
+  P.depositAlarm = function (x, y, amount) {
+    if (!this.alarmGrid) return
+    const idx = this._shelterIdx(x, y)
+    this.alarmGrid[idx] = Math.min(5.0, this.alarmGrid[idx] + amount)
+  }
+
+  P.sampleAlarm = function (x, y) {
+    if (!this.alarmGrid) return 0
+    return this.alarmGrid[this._shelterIdx(x, y)]
+  }
+
+  // Fast alarm decay — pheromone is transient, not persistent
+  P._decayAlarm = function () {
+    if (!this.alarmGrid) return
+    const grid = this.alarmGrid
+    const len = grid.length
+    // Process all cells every tick — alarm must fade fast
+    // Decay factor ~0.97 per tick → half-life ~23 ticks
+    for (let i = 0; i < len; i++) {
+      if (grid[i] > 0.001) {
+        grid[i] *= 0.97
+      } else {
+        grid[i] = 0
+      }
+    }
+  }
+
+  // ── Terrain object generation ──
+  // Spawns static biome features: kelp stalks, coral heads, vent chimneys, etc.
+  // These provide shelter, visual interest, and biome identity.
+  P._generateTerrain = function () {
+    this.terrainObjects = []
+    const biomes = this.cfg.biomes
+    if (!biomes || biomes.length === 0) return
+    const nb = biomes.length
+    const regionW = this.w / nb
+
+    // Terrain types per biome flora
+    const floraTypes = {
+      kelp: ['kelp_stalk', 'kelp_stalk', 'kelp_stalk', 'seagrass_patch', 'sponge', 'rock'],
+      coral: ['coral_head', 'coral_fan', 'coral_head', 'anemone', 'sponge', 'rock'],
+      plankton: ['rock', 'jellyfish_bloom'],
+      detritus: ['rock', 'bone_pile', 'sponge'],
+      tubeworm: ['vent_chimney', 'tube_cluster', 'vent_chimney', 'tube_cluster', 'rock']
+    }
+
+    for (let bi = 0; bi < nb; bi++) {
+      const biome = biomes[bi]
+      const flora = biome.flora || 'plankton'
+      const types = floraTypes[flora] || ['rock']
+      // Density: more objects in structured biomes, fewer in open ocean
+      const density = flora === 'plankton' ? 8 : flora === 'detritus' ? 14 : 30
+      const x0 = bi * regionW
+      const x1 = (bi + 1) * regionW
+
+      for (let k = 0; k < density; k++) {
+        // Random position within biome region and inside blob
+        let ox, oy
+        let found = false
+        for (let attempt = 0; attempt < 20; attempt++) {
+          ox = x0 + this.rng() * regionW
+          oy = this.h * 0.15 + this.rng() * this.h * 0.7
+          if (this.isInsideBlob(ox, oy) && !this.isInsideBarrier(ox, oy)) {
+            found = true
+            break
+          }
+        }
+        if (!found) continue
+
+        const type = types[(k * 7 + bi * 3) % types.length]
+        const seed = ((ox * 31 + oy * 17 + k * 137) | 0) & 0xffff
+        let size = 0.5 + this.rng() * 1.0
+        let hue = 0
+
+        // Type-specific sizing and coloring
+        switch (type) {
+          case 'kelp_stalk':
+            size = 0.8 + this.rng() * 1.5
+            hue = 90 + this.rng() * 30 // olive-green
+            break
+          case 'seagrass_patch':
+            size = 0.6 + this.rng() * 0.8
+            hue = 110 + this.rng() * 20 // bright green
+            break
+          case 'coral_head':
+            size = 0.6 + this.rng() * 1.2
+            hue = this.rng() * 360 // any color — corals are wildly varied
+            break
+          case 'coral_fan':
+            size = 0.4 + this.rng() * 0.8
+            hue = 300 + this.rng() * 60 // pink-purple
+            break
+          case 'anemone':
+            size = 0.3 + this.rng() * 0.6
+            hue = 30 + this.rng() * 40 // orange-yellow
+            break
+          case 'sponge':
+            size = 0.3 + this.rng() * 0.5
+            hue = 40 + this.rng() * 30 // yellow-brown
+            break
+          case 'vent_chimney':
+            size = 1.0 + this.rng() * 2.0
+            hue = 15 + this.rng() * 20 // dark amber
+            break
+          case 'tube_cluster':
+            size = 0.5 + this.rng() * 1.0
+            hue = 0 + this.rng() * 15 // deep red
+            break
+          case 'bone_pile':
+            size = 0.3 + this.rng() * 0.5
+            hue = 45 // pale bone
+            break
+          case 'jellyfish_bloom':
+            size = 0.2 + this.rng() * 0.4
+            hue = 200 + this.rng() * 40 // cyan-blue
+            break
+          case 'rock':
+            size = 0.4 + this.rng() * 0.8
+            hue = 200 + this.rng() * 30 // blue-grey
+            break
+        }
+
+        this.terrainObjects.push({
+          x: ox,
+          y: oy,
+          type,
+          size,
+          biome: bi,
+          age: 0,
+          hue,
+          seed
+        })
+
+        // Deposit initial shelter at terrain object locations
+        this.depositShelter(ox, oy, size * 0.5)
+      }
+    }
   }
 
   P._enforceBlobBoundary = function (c) {
@@ -330,9 +557,9 @@ export function installWorld(Sim) {
     // Sun angle sweeps 360° per day
     this.sunAngle = this.dayPhase * Math.PI * 2
 
-    // Intensity follows a smooth curve: bright at noon (phase=0.5), dark at midnight (phase=0)
-    // Using a raised cosine so transitions are smooth
-    // Phase 0.0 = dawn, 0.25 = noon, 0.5 = dusk, 0.75 = midnight
+    // Intensity follows a smooth raised cosine: bright at noon, dark at midnight.
+    // Phase 0.0 = midnight, 0.125 = dawn, 0.25 = noon, 0.375 = dusk, 0.5 = midnight again.
+    // The curve is symmetric around 0.25 (noon) with period matching dayLength.
     this.sunIntensity = Math.max(0, Math.cos((this.dayPhase - 0.25) * Math.PI * 2)) * 0.85 + 0.15
     // sunIntensity: 0.15 at midnight (dim moonlight), 1.0 at noon
   }

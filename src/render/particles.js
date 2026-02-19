@@ -3,6 +3,10 @@ import { ROLE_PIONEER, ORGANELLE_FLAGELLUM } from '../sim/index.js'
 
 const TAU = Math.PI * 2
 
+// All particle positions, velocities, and sizes are stored in WORLD coordinates.
+// They are converted to screen space at render time so they track correctly
+// with camera zoom and pan.
+
 export function installParticles(Renderer) {
   const P = Renderer.prototype
 
@@ -13,33 +17,33 @@ export function installParticles(Renderer) {
   P._spawnDeathParticles = function (sim) {
     if (!sim.deathEvents || sim.deathEvents.length === 0) return
     const S = this.view.scale
-    // Scale particle budget with population — fewer particles when busy
     const pop = sim.cells.length
     const particleBudget = pop > 3000 ? 0.25 : pop > 1500 ? 0.5 : pop > 800 ? 0.75 : 1.0
     for (const ev of sim.deathEvents) {
+      // Cull off-screen events
       const [sx, sy] = this.worldToScreen(ev.x, ev.y)
       if (sx < -80 || sx > this.canvas.width + 80 || sy < -80 || sy > this.canvas.height + 80) continue
 
-      // Compute organism's actual color — matches cell renderer formula
+      const wx = ev.x,
+        wy = ev.y
+
       const baseHue = cladeHue(ev.clade)
       const hue = (baseHue + (ev.hueShift || 0) * 60 + ev.diet * 40 - 10 + 360) % 360
       const sat = 65 + ev.diet * 12
       const lum = 50 + (ev.brightness || 0) * 15
-      // Organelle accent hues
       const nucHue = (hue + 180) % 360
       const hasNuc = ev.organelles && ev.organelles[0] > 0.1
       const hasMito = ev.organelles && ev.organelles[1] > 0.1
 
       if (ev.type === 'killed') {
-        // ── PREDATION KILL: violent explosion in organism colors ──
         this._deathParticles.push({
-          x: sx,
-          y: sy,
+          x: wx,
+          y: wy,
           vx: 0,
           vy: 0,
           life: 1.0,
           decay: 0.04,
-          size: (3 + ev.energy * 2) * S,
+          size: 3 + ev.energy * 2,
           hue,
           sat,
           lum,
@@ -47,13 +51,13 @@ export function installParticles(Renderer) {
           diet: ev.diet
         })
         this._deathParticles.push({
-          x: sx,
-          y: sy,
+          x: wx,
+          y: wy,
           vx: 0,
           vy: 0,
           life: 1.0,
           decay: 0.05,
-          size: (8 + ev.energy * 3) * S,
+          size: 8 + ev.energy * 3,
           hue,
           sat,
           lum,
@@ -64,19 +68,18 @@ export function installParticles(Renderer) {
         for (let i = 0; i < meatCount; i++) {
           if (this._deathParticles.length >= this._maxDeathParticles) break
           const angle = (i / meatCount) * TAU + Math.random() * 0.5
-          const v = (1.5 + Math.random() * 3.0) * S
-          // Mix of organism color, nucleus, and mito chunks
+          const v = 1.5 + Math.random() * 3.0
           let chunkHue = hue
           if (hasNuc && Math.random() < 0.25) chunkHue = nucHue
           else if (hasMito && Math.random() < 0.2) chunkHue = 15
           this._deathParticles.push({
-            x: sx,
-            y: sy,
+            x: wx,
+            y: wy,
             vx: Math.cos(angle) * v,
             vy: Math.sin(angle) * v,
             life: 1.0,
             decay: 0.015 + Math.random() * 0.012,
-            size: (1.5 + Math.random() * 3.0) * S,
+            size: 1.5 + Math.random() * 3.0,
             hue: chunkHue,
             sat,
             lum,
@@ -89,15 +92,15 @@ export function installParticles(Renderer) {
         for (let i = 0; i < splatCount; i++) {
           if (this._deathParticles.length >= this._maxDeathParticles) break
           const angle = Math.random() * TAU
-          const v = (0.8 + Math.random() * 2.0) * S
+          const v = 0.8 + Math.random() * 2.0
           this._deathParticles.push({
-            x: sx + (Math.random() * 4 - 2) * S,
-            y: sy + (Math.random() * 4 - 2) * S,
+            x: wx + (Math.random() * 4 - 2),
+            y: wy + (Math.random() * 4 - 2),
             vx: Math.cos(angle) * v,
             vy: Math.sin(angle) * v,
             life: 1.0,
             decay: 0.018 + Math.random() * 0.012,
-            size: (2.0 + Math.random() * 3.5) * S,
+            size: 2.0 + Math.random() * 3.5,
             hue,
             sat: sat * 0.6,
             lum: lum - 10,
@@ -105,19 +108,18 @@ export function installParticles(Renderer) {
           })
         }
       } else if (ev.type === 'culled') {
-        // ── BEHAVIORAL CULL: quiet dissolve in organism color ──
         const wispCount = Math.ceil(6 * particleBudget)
         for (let i = 0; i < wispCount; i++) {
           if (this._deathParticles.length >= this._maxDeathParticles) break
           const angle = (i / wispCount) * TAU + Math.random() * 0.8
           this._deathParticles.push({
-            x: sx,
-            y: sy,
-            vx: Math.cos(angle) * 0.5 * S,
-            vy: (Math.sin(angle) * 0.5 + 0.2) * S,
+            x: wx,
+            y: wy,
+            vx: Math.cos(angle) * 0.5,
+            vy: Math.sin(angle) * 0.5 + 0.2,
             life: 1.0,
             decay: 0.025,
-            size: (1.5 + Math.random() * 2.0) * S,
+            size: 1.5 + Math.random() * 2.0,
             hue,
             sat,
             lum,
@@ -125,15 +127,14 @@ export function installParticles(Renderer) {
           })
         }
       } else {
-        // ── NATURAL DEATH (aged): slow decay in organism color ──
         this._deathParticles.push({
-          x: sx,
-          y: sy,
+          x: wx,
+          y: wy,
           vx: 0,
           vy: 0,
           life: 1.0,
           decay: 0.012,
-          size: (5 + ev.energy * 1.5) * S,
+          size: 5 + ev.energy * 1.5,
           hue,
           sat,
           lum,
@@ -147,13 +148,13 @@ export function installParticles(Renderer) {
           if (hasNuc && Math.random() < 0.2) dripHue = nucHue
           else if (hasMito && Math.random() < 0.15) dripHue = 15
           this._deathParticles.push({
-            x: sx + Math.cos(angle) * 2 * S,
-            y: sy + Math.sin(angle) * 2 * S,
-            vx: (Math.cos(angle) * 0.3 + (Math.random() - 0.5) * 0.4) * S,
-            vy: (0.3 + Math.random() * 0.8) * S,
+            x: wx + Math.cos(angle) * 2,
+            y: wy + Math.sin(angle) * 2,
+            vx: Math.cos(angle) * 0.3 + (Math.random() - 0.5) * 0.4,
+            vy: 0.3 + Math.random() * 0.8,
             life: 1.0,
             decay: 0.018 + Math.random() * 0.01,
-            size: (1.0 + Math.random() * 2.0) * S,
+            size: 1.0 + Math.random() * 2.0,
             hue: dripHue,
             sat,
             lum,
@@ -164,13 +165,13 @@ export function installParticles(Renderer) {
           if (this._deathParticles.length >= this._maxDeathParticles) break
           const angle = Math.random() * TAU
           this._deathParticles.push({
-            x: sx,
-            y: sy,
-            vx: Math.cos(angle) * 0.8 * S,
-            vy: Math.sin(angle) * 0.8 * S,
+            x: wx,
+            y: wy,
+            vx: Math.cos(angle) * 0.8,
+            vy: Math.sin(angle) * 0.8,
             life: 1.0,
             decay: 0.03,
-            size: (1.5 + Math.random() * 1.5) * S,
+            size: 1.5 + Math.random() * 1.5,
             hue,
             sat,
             lum,
@@ -188,9 +189,12 @@ export function installParticles(Renderer) {
     if (parts.length === 0) return
     const ctx = this.ctx
     const S = this.view.scale
+    const vcx = this.view.cx,
+      vcy = this.view.cy
+    const hw = this.canvas.width * 0.5,
+      hh = this.canvas.height * 0.5
     ctx.save()
 
-    // Compact dead particles with swap-and-pop (O(1) per removal)
     let writeIdx = 0
     for (let i = 0; i < parts.length; i++) {
       const p = parts[i]
@@ -203,27 +207,29 @@ export function installParticles(Renderer) {
 
     for (let i = 0; i < parts.length; i++) {
       const p = parts[i]
-
       const a = p.life * p.life
+      // Convert world → screen for this frame
+      const px = (p.x - vcx) * S + hw
+      const py = (p.y - vcy) * S + hh
 
       switch (p.kind) {
         case 'shockwave': {
-          const ringR = p.size * (3.0 + (1 - p.life) * 12)
+          const ringR = p.size * S * (3.0 + (1 - p.life) * 12)
           ctx.globalAlpha = a * 0.2
           ctx.strokeStyle = hsla(p.hue, p.sat || 70, (p.lum || 60) + 15, 0.8)
           ctx.lineWidth = 1.5 * p.life + 0.3
           ctx.beginPath()
-          ctx.arc(p.x, p.y, ringR, 0, TAU)
+          ctx.arc(px, py, ringR, 0, TAU)
           ctx.stroke()
           break
         }
         case 'flash': {
-          const fr = p.size * p.life * p.life
+          const fr = p.size * S * p.life * p.life
           ctx.globalCompositeOperation = 'lighter'
-          ctx.globalAlpha = a * 0.25
+          ctx.globalAlpha = a * 0.12
           ctx.fillStyle = hsla(p.hue, (p.sat || 70) - 10, (p.lum || 60) + 25, 0.8)
           ctx.beginPath()
-          ctx.arc(p.x, p.y, fr, 0, TAU)
+          ctx.arc(px, py, fr, 0, TAU)
           ctx.fill()
           ctx.globalCompositeOperation = 'source-over'
           break
@@ -233,12 +239,12 @@ export function installParticles(Renderer) {
           p.y += p.vy
           p.vx *= 0.94
           p.vy *= 0.94
-          p.vy += 0.02 * S
-          const s = p.size * (0.4 + p.life * 0.6)
+          p.vy += 0.02
+          const s = p.size * S * (0.4 + p.life * 0.6)
           ctx.globalAlpha = a * 0.5
           ctx.fillStyle = hsl(p.hue, 85, 60)
           ctx.beginPath()
-          ctx.arc(p.x, p.y, s, 0, TAU)
+          ctx.arc(px, py, s, 0, TAU)
           ctx.fill()
           break
         }
@@ -247,26 +253,23 @@ export function installParticles(Renderer) {
           p.y += p.vy
           p.vx *= 0.88
           p.vy *= 0.88
-          p.vy += 0.04 * S
-          const sr = p.size * (0.5 + p.life * 0.5)
+          p.vy += 0.04
+          const sr = p.size * S * (0.5 + p.life * 0.5)
           ctx.globalAlpha = a * 0.35
           ctx.fillStyle = hsl(p.hue, p.sat || 60, (p.lum || 40) - 8)
           ctx.beginPath()
-          ctx.arc(p.x, p.y, sr, 0, TAU)
+          ctx.arc(px, py, sr, 0, TAU)
           ctx.fill()
           break
         }
         case 'dissolve_ring': {
-          // Gentle expanding dissolve ring
-          const dr = p.size * (1.5 + (1 - p.life) * 6)
+          const dr = p.size * S * (1.5 + (1 - p.life) * 6)
           ctx.globalAlpha = a * 0.25
           ctx.strokeStyle = hsla(p.hue, 40, 70, 0.5)
           ctx.lineWidth = 1.0 * p.life + 0.2
-          ctx.setLineDash([2, 3])
           ctx.beginPath()
-          ctx.arc(p.x, p.y, dr, 0, TAU)
+          ctx.arc(px, py, dr, 0, TAU)
           ctx.stroke()
-          ctx.setLineDash([])
           break
         }
         case 'soul_wisp': {
@@ -274,11 +277,11 @@ export function installParticles(Renderer) {
           p.y += p.vy
           p.vx *= 0.97
           p.vy *= 0.98
-          const wr = p.size * (0.3 + p.life * 0.7)
+          const wr = p.size * S * (0.3 + p.life * 0.7)
           ctx.globalAlpha = a * 0.25
           ctx.fillStyle = hsl(p.hue, p.sat || 45, p.lum || 70)
           ctx.beginPath()
-          ctx.arc(p.x, p.y, wr, 0, TAU)
+          ctx.arc(px, py, wr, 0, TAU)
           ctx.fill()
           break
         }
@@ -288,13 +291,12 @@ export function installParticles(Renderer) {
           p.vx *= 0.92
           p.vy *= 0.92
           p.rot += p.rotV
-          // Curved membrane fragment
-          const mfr = p.size * p.life
+          const mfr = p.size * S * p.life
           ctx.globalAlpha = a * 0.3
           ctx.strokeStyle = hsla(p.hue, p.sat || 50, (p.lum || 60) + 10, 0.7)
           ctx.lineWidth = 0.6 + p.life * 0.8
           ctx.save()
-          ctx.translate(p.x, p.y)
+          ctx.translate(px, py)
           ctx.rotate(p.rot)
           ctx.beginPath()
           ctx.arc(0, 0, mfr, -0.8, 0.8)
@@ -307,11 +309,11 @@ export function installParticles(Renderer) {
           p.y += p.vy
           p.vy -= 0.02
           p.vx *= 0.96
-          const wr2 = p.size * p.life
+          const wr2 = p.size * S * p.life
           ctx.globalAlpha = a * 0.3
           ctx.fillStyle = hsla(p.hue, 30, 60, 0.5)
           ctx.beginPath()
-          ctx.arc(p.x, p.y, wr2, 0, TAU)
+          ctx.arc(px, py, wr2, 0, TAU)
           ctx.fill()
           break
         }
@@ -320,54 +322,44 @@ export function installParticles(Renderer) {
           p.y += p.vy
           p.vx *= 0.93
           p.vy *= 0.93
-          p.vy += 0.03 * S
-          const mcLife = p.life
-          const mcHue = p.hue
-          const mcr = p.size * (0.4 + mcLife * 0.6)
+          p.vy += 0.03
+          const mcr = p.size * S * (0.4 + p.life * 0.6)
           ctx.globalAlpha = a * 0.4
-          ctx.fillStyle = hsl(mcHue, p.sat || 60, (p.lum || 45) - 8)
+          ctx.fillStyle = hsl(p.hue, p.sat || 60, (p.lum || 45) - 8)
           ctx.beginPath()
-          ctx.arc(p.x, p.y, mcr, 0, TAU)
+          ctx.arc(px, py, mcr, 0, TAU)
           ctx.fill()
           break
         }
         case 'decay_body': {
-          const dbLife = p.life
-          const dbHue = p.hue
-          const dbr = p.size * (0.3 + dbLife * 0.7)
-          // Core body — simple circle
+          const dbr = p.size * S * (0.3 + p.life * 0.7)
           ctx.globalAlpha = a * 0.35
-          ctx.fillStyle = hsl(dbHue, p.sat || 50, (p.lum || 40) - 10)
+          ctx.fillStyle = hsl(p.hue, p.sat || 50, (p.lum || 40) - 10)
           ctx.beginPath()
-          ctx.arc(p.x, p.y, dbr, 0, TAU)
+          ctx.arc(px, py, dbr, 0, TAU)
           ctx.fill()
-          // Decay spots
-          if (dbLife < 0.7) {
-            ctx.globalAlpha = (1 - dbLife) * 0.35
+          if (p.life < 0.7) {
+            ctx.globalAlpha = (1 - p.life) * 0.35
             ctx.fillStyle = hsl(p.hue, (p.sat || 40) - 20, 20)
             const sa = (2.3 + p.size) % TAU
             ctx.beginPath()
-            ctx.arc(p.x + Math.cos(sa) * dbr * 0.3, p.y + Math.sin(sa) * dbr * 0.3, dbr * 0.15, 0, TAU)
+            ctx.arc(px + Math.cos(sa) * dbr * 0.3, py + Math.sin(sa) * dbr * 0.3, dbr * 0.15, 0, TAU)
             ctx.fill()
           }
           break
         }
         case 'meat_drip': {
-          // Small chunks that drip downward, shifting from organism color to meat red
           p.x += p.vx
           p.y += p.vy
           p.vx *= 0.96
-          p.vy += 0.015 * S
-          const mdLife = p.life
-          const mdHue = p.hue
-          const mdSat = (p.sat || 55) - (1 - mdLife) * 10
-          const mdLum = (p.lum || 45) - (1 - mdLife) * 12
-          const mdr = p.size * (0.4 + mdLife * 0.6)
+          p.vy += 0.015
+          const mdSat = (p.sat || 55) - (1 - p.life) * 10
+          const mdLum = (p.lum || 45) - (1 - p.life) * 12
+          const mdr = p.size * S * (0.4 + p.life * 0.6)
           ctx.globalAlpha = a * 0.4
-          ctx.fillStyle = hsla(mdHue, mdSat, mdLum, 0.8)
+          ctx.fillStyle = hsla(p.hue, mdSat, mdLum, 0.8)
           ctx.beginPath()
-          // Teardrop shape — elongated downward
-          ctx.ellipse(p.x, p.y, mdr * 0.6, mdr, Math.PI * 0.5 + Math.atan2(p.vy, p.vx), 0, TAU)
+          ctx.ellipse(px, py, mdr * 0.6, mdr, Math.PI * 0.5 + Math.atan2(p.vy, p.vx), 0, TAU)
           ctx.fill()
           break
         }
@@ -376,36 +368,33 @@ export function installParticles(Renderer) {
           p.y += p.vy
           p.vx *= 0.95
           p.vy *= 0.95
-          p.vy += 0.01 * S
-          const dwLife = p.life
-          const dwHue = p.hue
-          const dwr = p.size * (0.3 + dwLife * 0.7)
+          p.vy += 0.01
+          const dwr = p.size * S * (0.3 + p.life * 0.7)
           ctx.globalAlpha = a * 0.2
-          ctx.fillStyle = hsl(dwHue, p.sat || 40, (p.lum || 45) - 5)
+          ctx.fillStyle = hsl(p.hue, p.sat || 40, (p.lum || 45) - 5)
           ctx.beginPath()
-          ctx.arc(p.x, p.y, dwr, 0, TAU)
+          ctx.arc(px, py, dwr, 0, TAU)
           ctx.fill()
           break
         }
-        // Birth particles
         case 'birth_ring': {
-          const br = p.size * (1.0 + (1 - p.life) * 5)
+          const br = p.size * S * (1.0 + (1 - p.life) * 5)
           ctx.globalCompositeOperation = 'lighter'
-          ctx.globalAlpha = a * 0.2
+          ctx.globalAlpha = a * 0.1
           ctx.strokeStyle = hsla(p.hue, 70, 80, 0.8)
           ctx.lineWidth = 1.2 * p.life + 0.3
           ctx.beginPath()
-          ctx.arc(p.x, p.y, br, 0, TAU)
+          ctx.arc(px, py, br, 0, TAU)
           ctx.stroke()
           ctx.globalCompositeOperation = 'source-over'
           break
         }
         case 'birth_flash': {
-          const bfr = p.size * p.life
+          const bfr = p.size * S * p.life
           ctx.globalAlpha = a * 0.2
           ctx.fillStyle = 'rgba(200,255,220,0.7)'
           ctx.beginPath()
-          ctx.arc(p.x, p.y, bfr, 0, TAU)
+          ctx.arc(px, py, bfr, 0, TAU)
           ctx.fill()
           break
         }
@@ -414,21 +403,20 @@ export function installParticles(Renderer) {
           p.y += p.vy
           p.vx *= 0.92
           p.vy *= 0.92
-          const bsr = p.size * (0.3 + p.life * 0.7)
+          const bsr = p.size * S * (0.3 + p.life * 0.7)
           ctx.globalCompositeOperation = 'lighter'
-          ctx.globalAlpha = a * 0.35
+          ctx.globalAlpha = a * 0.15
           ctx.fillStyle = hsla(p.hue + 60, 70, 85, 0.9)
           ctx.beginPath()
-          ctx.arc(p.x, p.y, bsr, 0, TAU)
+          ctx.arc(px, py, bsr, 0, TAU)
           ctx.fill()
-          // Cross sparkle
           ctx.strokeStyle = hsla(p.hue + 60, 50, 90, 0.6)
           ctx.lineWidth = 0.3
           ctx.beginPath()
-          ctx.moveTo(p.x - bsr * 2, p.y)
-          ctx.lineTo(p.x + bsr * 2, p.y)
-          ctx.moveTo(p.x, p.y - bsr * 2)
-          ctx.lineTo(p.x, p.y + bsr * 2)
+          ctx.moveTo(px - bsr * 2, py)
+          ctx.lineTo(px + bsr * 2, py)
+          ctx.moveTo(px, py - bsr * 2)
+          ctx.lineTo(px, py + bsr * 2)
           ctx.stroke()
           ctx.globalCompositeOperation = 'source-over'
           break
@@ -439,13 +427,12 @@ export function installParticles(Renderer) {
           p.vx *= 0.95
           p.vy *= 0.95
           p.rot += p.rotV
-          // Helical DNA-like strand fragment
-          const stLen = p.size * 2 * p.life
+          const stLen = p.size * S * 2 * p.life
           ctx.globalAlpha = a * 0.2
           ctx.strokeStyle = hsla(p.hue + 120, 60, 70, 0.7)
           ctx.lineWidth = 0.5
           ctx.save()
-          ctx.translate(p.x, p.y)
+          ctx.translate(px, py)
           ctx.rotate(p.rot)
           ctx.beginPath()
           for (let si = 0; si < 8; si++) {
@@ -457,30 +444,30 @@ export function installParticles(Renderer) {
           ctx.restore()
           break
         }
-        // Eating particles
         case 'eat_absorb': {
-          // Spiral inward toward center
           p.rot += 0.15
           const eDist = p.size * p.life * 3
           p.x = p.cx + Math.cos(p.rot) * eDist
           p.y = p.cy + Math.sin(p.rot) * eDist
           const ear = (0.5 + p.life * 1.0) * S
+          const epx = (p.x - vcx) * S + hw
+          const epy = (p.y - vcy) * S + hh
           ctx.globalCompositeOperation = 'lighter'
-          ctx.globalAlpha = a * 0.3
+          ctx.globalAlpha = a * 0.15
           ctx.fillStyle = hsla(p.hue, 70, 70, 0.8)
           ctx.beginPath()
-          ctx.arc(p.x, p.y, ear, 0, TAU)
+          ctx.arc(epx, epy, ear, 0, TAU)
           ctx.fill()
           ctx.globalCompositeOperation = 'source-over'
           break
         }
         case 'eat_ripple': {
-          const er = p.size * (0.5 + (1 - p.life) * 3)
+          const er = p.size * S * (0.5 + (1 - p.life) * 3)
           ctx.globalAlpha = a * 0.2
           ctx.strokeStyle = hsla(p.hue, 50, 70, 0.5)
           ctx.lineWidth = 0.6 * p.life
           ctx.beginPath()
-          ctx.arc(p.x, p.y, er, 0, TAU)
+          ctx.arc(px, py, er, 0, TAU)
           ctx.stroke()
           break
         }
@@ -489,12 +476,12 @@ export function installParticles(Renderer) {
           p.y += p.vy
           p.vx *= 0.9
           p.vy *= 0.9
-          const enr = p.size * p.life
+          const enr = p.size * S * p.life
           ctx.globalCompositeOperation = 'lighter'
-          ctx.globalAlpha = a * 0.25
+          ctx.globalAlpha = a * 0.12
           ctx.fillStyle = hsla(p.hue, 60, 75, 0.7)
           ctx.beginPath()
-          ctx.arc(p.x, p.y, enr, 0, TAU)
+          ctx.arc(px, py, enr, 0, TAU)
           ctx.fill()
           ctx.globalCompositeOperation = 'source-over'
           break
@@ -520,26 +507,28 @@ export function installParticles(Renderer) {
       const [sx, sy] = this.worldToScreen(ev.x, ev.y)
       if (sx < -60 || sx > this.canvas.width + 60 || sy < -60 || sy > this.canvas.height + 60) continue
 
+      const wx = ev.x,
+        wy = ev.y
       const hue = cladeHue(ev.clade)
       this._deathParticles.push({
-        x: sx,
-        y: sy,
+        x: wx,
+        y: wy,
         vx: 0,
         vy: 0,
         life: 1.0,
         decay: 0.05,
-        size: 3 * S,
+        size: 3,
         hue,
         kind: 'birth_ring'
       })
       this._deathParticles.push({
-        x: sx,
-        y: sy,
+        x: wx,
+        y: wy,
         vx: 0,
         vy: 0,
         life: 1.0,
         decay: 0.07,
-        size: 6 * S,
+        size: 6,
         hue,
         kind: 'birth_flash'
       })
@@ -547,15 +536,15 @@ export function installParticles(Renderer) {
       for (let i = 0; i < sparkCount; i++) {
         if (this._deathParticles.length >= this._maxDeathParticles) break
         const angle = (i / sparkCount) * TAU + Math.random() * 0.4
-        const v = (1.0 + Math.random() * 2.0) * S
+        const v = 1.0 + Math.random() * 2.0
         this._deathParticles.push({
-          x: sx,
-          y: sy,
+          x: wx,
+          y: wy,
           vx: Math.cos(angle) * v,
           vy: Math.sin(angle) * v,
           life: 1.0,
           decay: 0.04 + Math.random() * 0.02,
-          size: (0.5 + Math.random() * 1.0) * S,
+          size: 0.5 + Math.random() * 1.0,
           hue,
           kind: 'birth_sparkle'
         })
@@ -565,13 +554,13 @@ export function installParticles(Renderer) {
         if (this._deathParticles.length >= this._maxDeathParticles) break
         const angle = Math.random() * TAU
         this._deathParticles.push({
-          x: sx,
-          y: sy,
-          vx: Math.cos(angle) * 1.5 * S,
-          vy: Math.sin(angle) * 1.5 * S,
+          x: wx,
+          y: wy,
+          vx: Math.cos(angle) * 1.5,
+          vy: Math.sin(angle) * 1.5,
           life: 1.0,
           decay: 0.03,
-          size: (2 + Math.random() * 2) * S,
+          size: 2 + Math.random() * 2,
           hue,
           kind: 'birth_strand',
           rot: Math.random() * TAU,
@@ -594,33 +583,35 @@ export function installParticles(Renderer) {
       const [sx, sy] = this.worldToScreen(ev.x, ev.y)
       if (sx < -40 || sx > this.canvas.width + 40 || sy < -40 || sy > this.canvas.height + 40) continue
 
+      const wx = ev.x,
+        wy = ev.y
       const hue = ev.foodType === 0 ? 120 : ev.foodType === 1 ? 45 : 0
       const absCount = Math.ceil(5 * particleBudget)
       for (let i = 0; i < absCount; i++) {
         if (this._deathParticles.length >= this._maxDeathParticles) break
         this._deathParticles.push({
-          x: sx,
-          y: sy,
+          x: wx,
+          y: wy,
           vx: 0,
           vy: 0,
-          cx: sx,
-          cy: sy,
+          cx: wx,
+          cy: wy,
           life: 1.0,
           decay: 0.04,
-          size: (1.5 + Math.random() * 2) * S,
+          size: 1.5 + Math.random() * 2,
           hue,
           kind: 'eat_absorb',
           rot: (i / absCount) * TAU + Math.random() * 0.5
         })
       }
       this._deathParticles.push({
-        x: sx,
-        y: sy,
+        x: wx,
+        y: wy,
         vx: 0,
         vy: 0,
         life: 1.0,
         decay: 0.05,
-        size: 3 * S,
+        size: 3,
         hue,
         kind: 'eat_ripple'
       })
@@ -629,13 +620,13 @@ export function installParticles(Renderer) {
         if (this._deathParticles.length >= this._maxDeathParticles) break
         const angle = Math.random() * TAU
         this._deathParticles.push({
-          x: sx + Math.cos(angle) * 6 * S,
-          y: sy + Math.sin(angle) * 6 * S,
-          vx: -Math.cos(angle) * 1.5 * S,
-          vy: -Math.sin(angle) * 1.5 * S,
+          x: wx + Math.cos(angle) * 6,
+          y: wy + Math.sin(angle) * 6,
+          vx: -Math.cos(angle) * 1.5,
+          vy: -Math.sin(angle) * 1.5,
           life: 1.0,
           decay: 0.05,
-          size: (0.6 + Math.random() * 0.8) * S,
+          size: 0.6 + Math.random() * 0.8,
           hue,
           kind: 'eat_nutrient'
         })
@@ -684,43 +675,39 @@ export function installParticles(Renderer) {
 
   P._spawnMateParticles = function (sim) {
     if (!sim.mateEvents || sim.mateEvents.length === 0) return
-    const S = this.view.scale
     for (const ev of sim.mateEvents) {
       const [sx1, sy1] = this.worldToScreen(ev.x1, ev.y1)
-      const [sx2, sy2] = this.worldToScreen(ev.x2, ev.y2)
       const cw = this.canvas.width,
         ch = this.canvas.height
       if (sx1 < -60 || sx1 > cw + 60 || sy1 < -60 || sy1 > ch + 60) continue
 
       const hue = cladeHue(ev.clade)
-      const mx = (sx1 + sx2) / 2,
-        my = (sy1 + sy2) / 2
-      const dx = sx2 - sx1,
-        dy = sy2 - sy1
+      const mx = (ev.x1 + ev.x2) / 2,
+        my = (ev.y1 + ev.y2) / 2
+      const dx = ev.x2 - ev.x1,
+        dy = ev.y2 - ev.y1
       const dist = Math.sqrt(dx * dx + dy * dy) || 1
 
-      // Helix strand particles — spiral between the two parents
-      const count = Math.min(16, 6 + Math.floor(dist * 0.15))
+      const count = Math.min(16, 6 + Math.floor(dist * 0.5))
       for (let i = 0; i < count; i++) {
         const frac = i / count
-        const helixAngle = frac * Math.PI * 4 // 2 full turns
+        const helixAngle = frac * Math.PI * 4
         const perpX = -dy / dist,
           perpY = dx / dist
-        const helixR = (3 + S * 2) * Math.sin(helixAngle)
+        const helixR = 5 * Math.sin(helixAngle)
         this._mateParticles.push({
-          x: sx1 + dx * frac + perpX * helixR,
-          y: sy1 + dy * frac + perpY * helixR,
+          x: ev.x1 + dx * frac + perpX * helixR,
+          y: ev.y1 + dy * frac + perpY * helixR,
           vx: perpX * (0.3 + Math.random() * 0.5) * (Math.random() < 0.5 ? 1 : -1),
           vy: perpY * (0.3 + Math.random() * 0.5) * (Math.random() < 0.5 ? 1 : -1),
           life: 1.0,
           decay: 0.012 + Math.random() * 0.008,
-          size: (1.5 + Math.random() * 2.0) * S,
-          hue: (hue + 300 + Math.random() * 40) % 360, // pink/magenta shifted from clade hue
-          strand: i % 2 // which helix strand (0 or 1)
+          size: 1.5 + Math.random() * 2.0,
+          hue: (hue + 300 + Math.random() * 40) % 360,
+          strand: i % 2
         })
       }
 
-      // Central glow burst at midpoint
       for (let i = 0; i < 4; i++) {
         const a = Math.random() * TAU
         const spd = 0.3 + Math.random() * 0.6
@@ -731,13 +718,12 @@ export function installParticles(Renderer) {
           vy: Math.sin(a) * spd,
           life: 1.0,
           decay: 0.02 + Math.random() * 0.01,
-          size: (2.5 + Math.random() * 2.0) * S,
+          size: 2.5 + Math.random() * 2.0,
           hue: (hue + 320) % 360,
-          strand: -1 // glow particle, not strand
+          strand: -1
         })
       }
     }
-    // Cap total particles
     if (this._mateParticles.length > 200) {
       this._mateParticles.splice(0, this._mateParticles.length - 200)
     }
@@ -747,9 +733,13 @@ export function installParticles(Renderer) {
     const parts = this._mateParticles
     if (!parts || parts.length === 0) return
     const ctx = this.ctx
+    const S = this.view.scale
+    const vcx = this.view.cx,
+      vcy = this.view.cy
+    const hw = this.canvas.width * 0.5,
+      hh = this.canvas.height * 0.5
 
     ctx.save()
-    // Compact dead particles with forward sweep
     let mw = 0
     for (let i = 0; i < parts.length; i++) {
       const p = parts[i]
@@ -764,33 +754,31 @@ export function installParticles(Renderer) {
       const p = parts[i]
       p.x += p.vx
       p.y += p.vy
-      // Gentle drift toward center (particles converge)
       p.vx *= 0.97
       p.vy *= 0.97
 
+      const px = (p.x - vcx) * S + hw
+      const py = (p.y - vcy) * S + hh
       const a = p.life * p.life
 
       if (p.strand >= 0) {
-        // Helix strand particle — small bright dot
         ctx.globalCompositeOperation = 'lighter'
-        ctx.globalAlpha = a * 0.15
+        ctx.globalAlpha = a * 0.07
         ctx.fillStyle = hsla(p.hue, 80, 70, 0.5)
         ctx.beginPath()
-        ctx.arc(p.x, p.y, p.size * (0.5 + p.life * 0.5), 0, TAU)
+        ctx.arc(px, py, p.size * S * (0.5 + p.life * 0.5), 0, TAU)
         ctx.fill()
-        // Soft glow around it
         ctx.globalAlpha = a * 0.06
         ctx.fillStyle = hsla(p.hue, 60, 80, 0.3)
         ctx.beginPath()
-        ctx.arc(p.x, p.y, p.size * (1.5 + p.life), 0, TAU)
+        ctx.arc(px, py, p.size * S * (1.5 + p.life), 0, TAU)
         ctx.fill()
       } else {
-        // Central glow burst — larger, softer
         ctx.globalCompositeOperation = 'lighter'
-        ctx.globalAlpha = a * 0.1
+        ctx.globalAlpha = a * 0.05
         ctx.fillStyle = hsla(p.hue, 70, 75, 0.4)
         ctx.beginPath()
-        ctx.arc(p.x, p.y, p.size * (1.0 + (1 - p.life) * 2), 0, TAU)
+        ctx.arc(px, py, p.size * S * (1.0 + (1 - p.life) * 2), 0, TAU)
         ctx.fill()
       }
     }
@@ -800,19 +788,29 @@ export function installParticles(Renderer) {
   }
 
   P._drawTrails = function () {
+    const trails = this._trails
+    if (trails.length === 0) return
     const ctx = this.ctx
+    const _vs = this.view.scale
+    const _vcx = this.view.cx
+    const _vcy = this.view.cy
+    const _hw = this.canvas.width * 0.5
+    const _hh = this.canvas.height * 0.5
     ctx.save()
-    ctx.globalCompositeOperation = 'lighter'
-    for (let i = 0; i < this._trails.length; i++) {
-      const tr = this._trails[i]
-      const [sx, sy] = this.worldToScreen(tr.x, tr.y)
-      const r = tr.size * this.view.scale * 0.45 * (0.3 + tr.life * 0.7)
-      ctx.globalAlpha = tr.life * tr.life * 0.12
-      ctx.fillStyle = hsla(tr.hue, 55, 50, 0.5)
-      ctx.beginPath()
+    ctx.globalCompositeOperation = 'source-over'
+    ctx.globalAlpha = 0.04
+    ctx.fillStyle = 'rgba(100,140,120,0.5)'
+    ctx.beginPath()
+    for (let i = 0; i < trails.length; i++) {
+      const tr = trails[i]
+      const sx = (tr.x - _vcx) * _vs + _hw
+      const sy = (tr.y - _vcy) * _vs + _hh
+      const r = tr.size * _vs * 0.45 * (0.3 + tr.life * 0.7)
+      if (r < 0.3) continue
+      ctx.moveTo(sx + r, sy)
       ctx.arc(sx, sy, r, 0, TAU)
-      ctx.fill()
     }
+    ctx.fill()
     ctx.restore()
   }
 }

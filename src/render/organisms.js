@@ -51,12 +51,20 @@ export function buildOrganisms(cells, links, worldW, worldH, linkDist) {
   return result
 }
 
-// Color palettes for roles
+// Color palettes & specialization modifiers for roles
+// Each role dramatically changes the cell's appearance to show specialization
 export const ROLE_COLORS = {
-  [ROLE_NONE]: { hShift: 0, satBoost: 0, lumBoost: 0 },
-  [ROLE_EDGE]: { hShift: 10, satBoost: 10, lumBoost: 5 },
-  [ROLE_INTERIOR]: { hShift: -20, satBoost: -5, lumBoost: -8 },
-  [ROLE_PIONEER]: { hShift: 30, satBoost: 15, lumBoost: 12 }
+  [ROLE_NONE]: { hShift: 0, satBoost: 0, lumBoost: 0, scaleBoost: 0, memBoost: 0, glowBoost: 0 },
+  [ROLE_EDGE]: { hShift: 15, satBoost: 14, lumBoost: 8, scaleBoost: 0.08, memBoost: 0.4, glowBoost: 0 },
+  [ROLE_INTERIOR]: {
+    hShift: -30,
+    satBoost: -12,
+    lumBoost: -12,
+    scaleBoost: -0.06,
+    memBoost: -0.2,
+    glowBoost: 0.15
+  },
+  [ROLE_PIONEER]: { hShift: 40, satBoost: 20, lumBoost: 15, scaleBoost: 0.12, memBoost: 0.2, glowBoost: 0.1 }
 }
 
 // Organelle colors
